@@ -1,82 +1,43 @@
-"""Parse Claude Code transcript JSONL files for exact API token usage."""
+"""Parse a Claude Code transcript into per-API-call token events.
+
+Thin adapter over :mod:`context_tracker.transcript_reader`, which owns the
+de-duplication of the multiple transcript lines a single API response is
+written as. This module only maps those responses onto ``ApiTurnEvent``.
+"""
 
 from __future__ import annotations
 
-import json
-import logging
 from pathlib import Path
 
 from context_tracker.models import ApiTurnEvent
+from context_tracker.transcript_reader import SYNTHETIC_MODEL, iter_api_responses
 
-logger = logging.getLogger(__name__)
-
-# Claude Code uses this model name for synthetic/internal messages
-SYNTHETIC_MODEL = "synthetic"
+__all__ = ["SYNTHETIC_MODEL", "parse_transcript"]
 
 
 def parse_transcript(transcript_path: Path) -> list[ApiTurnEvent]:
-    """Extract API turn events from a Claude Code transcript JSONL file.
+    """Extract one ApiTurnEvent per API call from a transcript.
 
-    Claude Code emits multiple assistant entries per API call as streaming
-    chunks arrive. We only keep entries that have:
-    - type == "assistant"
-    - a non-null stop_reason (marks a completed API call)
-    - a usage object with output_tokens > 0
+    One event per API *response*, not per transcript line: Claude Code
+    writes a line per content block and repeats the usage on each, so
+    counting lines inflated every token total by 1.6-3x.
     """
-    if not transcript_path.exists():
-        return []
-
     events: list[ApiTurnEvent] = []
-    turn_number = 0
 
-    with open(transcript_path, encoding="utf-8") as f:
-        for line in f:
-            line = line.strip()
-            if not line:
-                continue
-
-            try:
-                entry = json.loads(line)
-            except json.JSONDecodeError:
-                continue
-
-            if entry.get("type") != "assistant":
-                continue
-
-            message = entry.get("message")
-            if not isinstance(message, dict):
-                continue
-
-            usage = message.get("usage")
-            if not isinstance(usage, dict):
-                continue
-
-            stop_reason = message.get("stop_reason")
-            if stop_reason is None:
-                continue
-
-            output_tokens = usage.get("output_tokens", 0)
-            if output_tokens == 0:
-                continue
-
-            model = message.get("model", "unknown")
-            if model == SYNTHETIC_MODEL:
-                continue
-
-            session_id = entry.get("sessionId", "unknown")
-            turn_number += 1
-
-            events.append(
-                ApiTurnEvent(
-                    session_id=session_id,
-                    turn_number=turn_number,
-                    input_tokens=usage.get("input_tokens", 0),
-                    output_tokens=output_tokens,
-                    cache_read_input_tokens=usage.get("cache_read_input_tokens", 0),
-                    cache_creation_input_tokens=usage.get("cache_creation_input_tokens", 0),
-                    model=model,
-                    stop_reason=stop_reason,
-                )
+    for turn_number, entry in enumerate(iter_api_responses(transcript_path), start=1):
+        message = entry["message"]
+        usage = message.get("usage", {})
+        events.append(
+            ApiTurnEvent(
+                session_id=entry.get("sessionId", "unknown"),
+                turn_number=turn_number,
+                input_tokens=usage.get("input_tokens", 0),
+                output_tokens=usage.get("output_tokens", 0),
+                cache_read_input_tokens=usage.get("cache_read_input_tokens", 0),
+                cache_creation_input_tokens=usage.get("cache_creation_input_tokens", 0),
+                model=message.get("model", "unknown"),
+                stop_reason=message.get("stop_reason"),
             )
+        )
 
     return events

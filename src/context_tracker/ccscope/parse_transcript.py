@@ -13,6 +13,19 @@ import os
 from pathlib import Path
 from typing import Any
 
+from context_tracker.transcript_reader import (
+    coalesce_assistant_entries as _coalesce_assistant_entries,
+)
+from context_tracker.transcript_reader import (
+    ephemeral_1h_tokens as _ephemeral_1h_tokens,
+)
+from context_tracker.transcript_reader import (
+    is_completed_assistant as _is_completed_assistant,
+)
+from context_tracker.transcript_reader import (
+    load_entries as _load_entries,
+)
+
 from .tokens import (
     DEFAULT_SYSTEM_PROMPT_TOKENS,
     char_count_of_block,
@@ -311,110 +324,6 @@ def parse_transcript_to_blocks(
 # ---------------------------------------------------------------------------
 # Internal helpers
 # ---------------------------------------------------------------------------
-
-
-def _load_entries(path: Path) -> list[dict]:
-    """Load all JSONL entries from the transcript file."""
-    entries = []
-    with open(path) as f:
-        for line in f:
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                entries.append(json.loads(line))
-            except json.JSONDecodeError:
-                continue
-    return entries
-
-
-def _ephemeral_1h_tokens(usage: dict) -> int:
-    """Cache-creation tokens written with the 1-hour TTL.
-
-    ``cache_creation_input_tokens`` is the total across both TTLs; the
-    nested ``cache_creation`` object breaks it down. A 1-hour write bills at
-    2x base input against 1.25x for the 5-minute one, so the split has to
-    survive into the cost model. Older transcripts omit the object, in which
-    case everything is treated as a 5-minute write.
-    """
-    breakdown = usage.get("cache_creation")
-    if not isinstance(breakdown, dict):
-        return 0
-    try:
-        return int(breakdown.get("ephemeral_1h_input_tokens", 0) or 0)
-    except (TypeError, ValueError):
-        return 0
-
-
-def _response_key(entry: dict) -> str | None:
-    """Identify the API response an assistant entry belongs to.
-
-    Claude Code writes one transcript line per content block of a single
-    response — a thinking line, a text line, a tool_use line — and each one
-    repeats the full ``message.usage``. Every line of one response shares
-    ``message.id`` (and ``requestId``), so either identifies the response.
-    Returns None when neither is present, which means the line can't be
-    matched to a sibling and has to stand on its own.
-    """
-    msg = entry.get("message", {})
-    message_id = msg.get("id")
-    if message_id:
-        return str(message_id)
-    request_id = entry.get("requestId")
-    return str(request_id) if request_id else None
-
-
-def _coalesce_assistant_entries(entries: list[dict]) -> list[dict]:
-    """Fold transcript lines that describe the same API response into one.
-
-    Completed assistant lines sharing a response key are merged into the first
-    of them, concatenating their content blocks in order; the usage is counted
-    once. Everything else — user entries, streaming chunks, unknown types —
-    passes through untouched, so tool_use indexing and turn ordering are
-    unaffected.
-    """
-    merged: dict[str, dict] = {}
-    result: list[dict] = []
-
-    for entry in entries:
-        msg = entry.get("message", {})
-        if entry.get("type") != "assistant" or not _is_completed_assistant(msg):
-            result.append(entry)
-            continue
-
-        key = _response_key(entry)
-        if key is None:
-            result.append(entry)
-            continue
-
-        first = merged.get(key)
-        if first is None:
-            content = msg.get("content", [])
-            copy = dict(entry)
-            copy["message"] = {**msg, "content": list(content) if isinstance(content, list) else content}
-            merged[key] = copy
-            result.append(copy)
-            continue
-
-        # Same response, another content block — keep the block, drop the usage.
-        extra = msg.get("content", [])
-        target = first["message"].get("content")
-        if isinstance(target, list) and isinstance(extra, list):
-            target.extend(extra)
-
-    return result
-
-
-def _is_completed_assistant(msg: dict) -> bool:
-    """Check if an assistant message is a completed API response."""
-    if msg.get("model") == "synthetic":
-        return False
-    if msg.get("stop_reason") is None:
-        return False
-    usage = msg.get("usage", {})
-    if usage.get("output_tokens", 0) <= 0:
-        return False
-    return True
 
 
 def _find_first_completed_usage(entries: list[dict]) -> dict[str, Any] | None:
