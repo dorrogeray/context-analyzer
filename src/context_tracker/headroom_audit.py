@@ -66,7 +66,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from context_tracker.analysis.config import PRICING
+from context_tracker.analysis.config import PRICING, rates_for_model
 from context_tracker.db import DEFAULT_DB_DIR, DEFAULT_DB_PATH
 
 logger = logging.getLogger("headroom_audit")
@@ -548,7 +548,7 @@ def input_side_cost(row: sqlite3.Row) -> float:
     """Input-side share of the recorded cost, at the same rates as ingest."""
     keys = row.keys()
     model = row["model"] if "model" in keys else None
-    rates = PRICING.get(model or "", PRICING["_default"])
+    rates = rates_for_model(model)
     total_create = row["total_cache_creation"] or 0
     create_1h = (row["total_cache_creation_1h"] or 0) if "total_cache_creation_1h" in keys else 0
     create_1h = max(0, min(create_1h, total_create))

@@ -12,7 +12,7 @@ from dataclasses import asdict, dataclass, field
 
 from sqlalchemy.orm import Session as DbSession
 
-from context_tracker.analysis.config import PRICING, cost_of_call
+from context_tracker.analysis.config import cost_of_call, rates_for_model
 from context_tracker.db import (
     ApiCallRecord,
     BlockRecord,
@@ -27,10 +27,6 @@ def _session_model(db: DbSession, session_id: str) -> str | None:
     return str(session_rec.model) if session_rec is not None and session_rec.model else None
 
 
-def _rates_for(model: str | None) -> dict[str, float]:
-    return PRICING.get(model or "", PRICING["_default"])
-
-
 def _tokens_to_cost(tokens: int, model: str | None = None) -> float:
     """Convert *input* token count to estimated cost in USD.
 
@@ -38,7 +34,7 @@ def _tokens_to_cost(tokens: int, model: str | None = None) -> float:
     helper ``_api_call_cost`` is preferred because it accounts for
     output and cache pricing too.
     """
-    return tokens * _rates_for(model)["input"] / 1_000_000
+    return tokens * rates_for_model(model)["input"] / 1_000_000
 
 
 def _api_call_cost(call: ApiCallRecord, model: str | None = None) -> float:

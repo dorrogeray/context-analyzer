@@ -27,7 +27,7 @@ import sqlite3
 
 import pytest
 
-from context_tracker.analysis.config import PRICING, cost_of_call
+from context_tracker.analysis.config import PRICING, cost_of_call, normalize_model
 from context_tracker.ccscope.parse_transcript import parse_transcript_to_blocks
 from context_tracker.db import (
     AGENT_CLAUDE_CODE,
@@ -425,3 +425,56 @@ def test_existing_databases_gain_the_ttl_columns(tmp_path):
 
     assert "total_cache_creation_1h" in sess_cols
     assert "cache_creation_1h" in call_cols
+
+
+# ---------------------------------------------------------------------------
+# Bug 6 — dated model IDs missed the table and fell back to Opus rates
+# ---------------------------------------------------------------------------
+
+
+def test_dated_model_ids_resolve_to_their_alias():
+    """Transcripts report dated snapshots; those must not miss the table."""
+    assert normalize_model("claude-haiku-4-5-20251001") == "claude-haiku-4-5"
+    assert normalize_model("claude-sonnet-4-5-20250929") == "claude-sonnet-4-5"
+    assert normalize_model("claude-opus-4-1-20250805") == "claude-opus-4-1"
+
+
+def test_context_window_suffix_survives_normalization():
+    """The [1m] variant is a distinct key and must not be stripped away."""
+    assert normalize_model("claude-opus-4-6[1m]") == "claude-opus-4-6[1m]"
+    assert normalize_model("claude-sonnet-4-5-20250929[1m]") == "claude-sonnet-4-5[1m]"
+
+
+def test_unknown_models_still_fall_back():
+    """Genuinely unknown models fall back rather than raising."""
+    assert normalize_model("<synthetic>") == "_default"
+    assert normalize_model("") == "_default"
+    assert normalize_model(None) == "_default"
+
+
+def test_dated_haiku_is_not_billed_as_opus():
+    """The bug: a dated Haiku ID was priced at the Opus default (5x)."""
+    dated = cost_of_call("claude-haiku-4-5-20251001", input_tokens=1_000_000)
+    alias = cost_of_call("claude-haiku-4-5", input_tokens=1_000_000)
+
+    assert dated == alias == pytest.approx(1.0)
+    assert dated < cost_of_call("_default", input_tokens=1_000_000)
+
+
+def test_session_with_a_dated_model_is_priced_correctly(tmp_path):
+    """End to end through ingest, not just the lookup helper."""
+    entries = _split_response_entries()
+    for entry in entries:
+        if entry["type"] == "assistant":
+            entry["message"]["model"] = "claude-haiku-4-5-20251001"
+    rec = _ingest(tmp_path, "sess-dated", entries)
+    expected = cost_of_call(
+        "claude-haiku-4-5",
+        input_tokens=_USAGE["input_tokens"],
+        output_tokens=_USAGE["output_tokens"],
+        cache_read=_USAGE["cache_read_input_tokens"],
+        cache_creation=_USAGE["cache_creation_input_tokens"],
+    )
+
+    assert rec is not None
+    assert rec.total_cost_usd == pytest.approx(round(expected, 4))

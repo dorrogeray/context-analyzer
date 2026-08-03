@@ -6,6 +6,7 @@ All defaults are labeled as uncalibrated — to be tuned against real sessions.
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -65,6 +66,11 @@ MODEL_BASE_RATES = {
     "claude-sonnet-5": (3.0, 15.0),
     "claude-sonnet-4-6": (3.0, 15.0),
     "claude-haiku-4-5": (1.0, 5.0),
+    # Older models still present in archived transcripts.
+    "claude-sonnet-4-5": (3.0, 15.0),
+    "claude-sonnet-4-0": (3.0, 15.0),
+    "claude-opus-4-1": (15.0, 75.0),
+    "claude-opus-4-0": (15.0, 75.0),
 }
 
 # The 1M-context variants carry no long-context premium.
@@ -90,6 +96,46 @@ def _rates(input_price: float, output_price: float) -> dict[str, float]:
 PRICING = {name: _rates(*rates) for name, rates in MODEL_BASE_RATES.items()}
 
 
+_DATE_SUFFIX_RE = re.compile(r"-\d{8}$")
+
+
+def normalize_model(model: str | None) -> str:
+    """Map a reported model string onto a pricing-table key.
+
+    Transcripts report either a bare alias (``claude-opus-5``) or a dated
+    snapshot (``claude-sonnet-4-5-20250929``); the context-window variant
+    adds a ``[1m]`` suffix. Without normalization every dated ID missed the
+    table and silently fell back to ``_default``, billing a Haiku session at
+    Opus rates.
+
+    Returns the matching key, or ``_default`` when the model is genuinely
+    unknown (a retired model we have no rates for, or an empty string).
+    """
+    name = (model or "").strip()
+    if not name:
+        return "_default"
+    if name in PRICING:
+        return name
+
+    suffix = ""
+    if name.endswith("]") and "[" in name:
+        base, _, rest = name.rpartition("[")
+        name, suffix = base, f"[{rest}"
+    else:
+        base = name
+
+    stripped = _DATE_SUFFIX_RE.sub("", name)
+    for candidate in (f"{stripped}{suffix}", stripped, f"{base}{suffix}", base):
+        if candidate in PRICING:
+            return candidate
+    return "_default"
+
+
+def rates_for_model(model: str | None) -> dict[str, float]:
+    """Per-Mtok rates for a reported model string."""
+    return PRICING[normalize_model(model)]
+
+
 def cost_of_call(
     model: str | None,
     input_tokens: int = 0,
@@ -109,7 +155,7 @@ def cost_of_call(
     Callers that don't know the split pass the total and get 5-minute
     pricing, which is what the API charges when no 1h TTL is requested.
     """
-    rates = PRICING.get(model or "", PRICING["_default"])
+    rates = rates_for_model(model)
     ttl_1h = max(0, min(int(cache_creation_1h), int(cache_creation)))
     ttl_5m = int(cache_creation) - ttl_1h
     return (
