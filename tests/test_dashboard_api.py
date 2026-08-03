@@ -146,3 +146,99 @@ def test_get_turn_messages_invalid_turn(client_with_transcript):
     client, session_id = client_with_transcript
     resp = client.get(f"/api/session/{session_id}/turn/999/messages")
     assert resp.status_code == 404
+
+
+@pytest.fixture
+def client_with_db(tmp_path):
+    """Like client_with_transcript, but with an isolated database.
+
+    The other fixtures leave db_path defaulted, which points at the real
+    ~/.context-analyzer/analyzer.db — fine for read-only endpoints, not for
+    anything that writes.
+    """
+    transcript_dir = tmp_path / "transcripts"
+    transcript_dir.mkdir(parents=True)
+    session_id = "test-session-reingest"
+    entries = [
+        {
+            "type": "user",
+            "message": {"role": "user", "content": [{"type": "text", "text": "Fix the bug"}]},
+            "timestamp": "2026-06-01T10:00:00Z",
+            "uuid": "u1",
+        },
+        {
+            "type": "assistant",
+            "message": {
+                "id": "msg_1",
+                "role": "assistant",
+                "content": [{"type": "text", "text": "I will fix it."}],
+                "model": "claude-opus-4-6",
+                "usage": {
+                    "input_tokens": 1000,
+                    "output_tokens": 50,
+                    "cache_read_input_tokens": 500,
+                    "cache_creation_input_tokens": 200,
+                },
+                "stop_reason": "end_turn",
+            },
+            "timestamp": "2026-06-01T10:00:05Z",
+            "uuid": "a1",
+        },
+    ]
+    with open(transcript_dir / f"{session_id}.jsonl", "w") as f:
+        for entry in entries:
+            f.write(json.dumps(entry) + "\n")
+
+    db_path = tmp_path / "analyzer.db"
+    app = create_app(
+        trace_dir=tmp_path / "traces",
+        transcript_dir=transcript_dir,
+        static_dir=tmp_path / "static",
+        db_path=db_path,
+    )
+    return TestClient(app), session_id, db_path
+
+
+class TestReingestEndpoint:
+    """POST /api/session/{id}/reingest — the UI's Re-ingest button."""
+
+    def test_reingest_returns_the_recosted_session(self, client_with_db):
+        client, session_id, _db = client_with_db
+
+        resp = client.post(f"/api/session/{session_id}/reingest")
+
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["session_id"] == session_id
+        assert "total_cost_usd" in body
+
+    def test_reingest_overwrites_a_stale_cost(self, client_with_db):
+        import sqlite3
+
+        client, session_id, db_path = client_with_db
+        client.post(f"/api/session/{session_id}/reingest")
+        con = sqlite3.connect(db_path)
+        con.execute("UPDATE sessions SET total_cost_usd = 999.99")
+        con.commit()
+        con.close()
+
+        body = client.post(f"/api/session/{session_id}/reingest").json()
+
+        assert body["total_cost_usd"] != pytest.approx(999.99)
+
+    def test_reingest_404s_for_an_unknown_session(self, client_with_db):
+        client, _sid, _db = client_with_db
+
+        resp = client.post("/api/session/deadbeef-0000-0000-0000-000000000000/reingest")
+
+        assert resp.status_code == 404
+
+    def test_session_data_meta_carries_the_model(self, client_with_db):
+        """The header needs it; meta used to contain only the session id."""
+        client, session_id, _db = client_with_db
+
+        meta = client.get(f"/api/session/{session_id}/data").json()["meta"]
+
+        assert meta["session_id"] == session_id
+        assert "model" in meta
+        assert "agent" in meta

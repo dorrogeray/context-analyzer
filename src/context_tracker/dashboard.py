@@ -47,6 +47,7 @@ from context_tracker.codex import (
     parse_codex_rollout,
 )
 from context_tracker.db import (
+    AGENT_CLAUDE_CODE,
     AGENT_CODEX,
     DEFAULT_DB_PATH,
     BlockRecord,
@@ -487,6 +488,34 @@ def create_app(
     def health_check() -> dict:
         return {"status": "ok"}
 
+    @app.post("/api/session/{session_id}/reingest")
+    def reingest_session(session_id: str) -> dict:
+        """Re-read one session's transcript and recost it.
+
+        Ingest is idempotent on the transcript's mtime, so this forces the
+        work — the reason to call it is that the analyzer's code changed,
+        not that the transcript did.
+        """
+        _validate_session_id(session_id)
+        from context_tracker.ingest import ingest_session as _ingest_one
+
+        rec = _ingest_one(
+            session_id,
+            trace_dir=trace_dir,
+            db_path=db_path,
+            force=True,
+            projects_dir=transcript_dir,
+        )
+        if rec is None:
+            raise HTTPException(status_code=404, detail="Session transcript not found")
+        return {
+            "session_id": rec.session_id,
+            "model": rec.model,
+            "total_api_calls": rec.total_api_calls,
+            "total_cost_usd": rec.total_cost_usd,
+            "source_mtime": rec.source_mtime,
+        }
+
     @app.get("/api/sessions")
     def get_sessions() -> list:
         """List all sessions with summary stats from SQLite."""
@@ -706,10 +735,15 @@ def create_app(
         if paths.get("transcript"):
             turn_map = build_turn_map(Path(paths["transcript"]))
 
+        model = next((c.get("model") for c in churn if c.get("model")), None)
         return {
             "blocks": blocks,
             "churn": churn,
-            "meta": {"session_id": session_id},
+            "meta": {
+                "session_id": session_id,
+                "agent": AGENT_CLAUDE_CODE,
+                "model": model,
+            },
             # Priced server-side so the dashboard renders the same number the
             # rest of the tool reports, instead of re-deriving it in JS.
             "cost": cost_breakdown(churn),

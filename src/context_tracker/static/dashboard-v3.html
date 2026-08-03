@@ -1666,11 +1666,19 @@ html, body {
           <option value="">Loading sessions...</option>
         </select>
         <button class="report-btn" id="report-btn" disabled title="Optimization Report">Optimization Report</button>
+        <button class="report-btn" id="reingest-btn" disabled title="Re-read this session's transcript and recost it">Re-ingest</button>
+        <label id="autorefresh-label" title="Re-ingest this session every 30 seconds"
+               style="display:inline-flex;align-items:center;gap:4px;font-size:12px;color:var(--text-muted);cursor:pointer">
+          <input type="checkbox" id="autorefresh-toggle"> auto
+        </label>
+        <span id="reingest-status" style="font-size:12px;color:var(--text-muted)"></span>
       </div>
       <div class="header-right">
         <a href="/sessions" class="nav-link">All Sessions</a>
         <a href="/optimize" class="nav-link">Optimize</a>
         <button class="info-btn" id="info-btn" title="What is this?">?</button>
+        <span id="header-session" title="Session ID — click to copy"
+              style="margin-left:10px;font-family:var(--mono);font-size:12px;color:var(--text-muted);cursor:pointer"></span>
         <span id="header-model" style="margin-left:10px;font-family:var(--mono);font-size:12px;color:var(--text-muted)"></span>
       </div>
     </div>
@@ -2049,6 +2057,8 @@ html, body {
       meta = data.meta || { session_id: sessionId };
       turnMap = data.turn_map || [];
 
+      updateSessionHeader(sessionId || (data.meta && data.meta.session_id) || '');
+
       // Fire non-blocking async fetches
       fetchTurnsData(sessionId);
       fetchHealthData(sessionId);
@@ -2127,15 +2137,103 @@ html, body {
       'Prefix ' + fmt(pinnedTokens) + ' tok \u00b7 ' + churn.length + ' calls';
     document.getElementById('churn-hint').textContent = 'Total re-read: ' + fmt(cumulativeRead[cumulativeRead.length - 1] || 0);
 
-    // Update header model
-    document.getElementById('header-model').textContent = meta.model || '';
-
-    // Update picker selection
-    picker.value = sessionId;
+    updateSessionHeader(sessionId);
     picker.classList.remove('loading');
+  }
 
-    // Enable report button
-    document.getElementById('report-btn').disabled = false;
+  // Header identity + controls. Called from BOTH load paths — this used to
+  // live only in switchSession, so on first page load the model was blank
+  // and nothing showed which session was on screen.
+  function updateSessionHeader(sessionId) {
+    const sid = sessionId || (meta && meta.session_id) || '';
+    document.getElementById('header-model').textContent = (meta && meta.model) || '';
+
+    const sidEl = document.getElementById('header-session');
+    sidEl.textContent = sid ? sid.substring(0, 8) : '';
+    sidEl.dataset.sessionId = sid;
+    sidEl.title = sid ? sid + ' \u2014 click to copy' : '';
+
+    const picker = document.getElementById('session-picker');
+    if (sid) picker.value = sid;
+
+    document.getElementById('report-btn').disabled = !sid;
+    document.getElementById('reingest-btn').disabled = !sid;
+  }
+
+  // ===== SESSION ID + RE-INGEST =====
+  let autorefreshTimer = null;
+  const AUTOREFRESH_MS = 30000;
+
+  function currentSessionId() {
+    return (meta && meta.session_id) || document.getElementById('session-picker').value || '';
+  }
+
+  function setReingestStatus(text, isError) {
+    const el = document.getElementById('reingest-status');
+    el.textContent = text;
+    el.style.color = isError ? 'var(--danger)' : 'var(--text-muted)';
+  }
+
+  async function reingestCurrentSession(silent) {
+    const sessionId = currentSessionId();
+    if (!sessionId) return false;
+    const btn = document.getElementById('reingest-btn');
+    btn.disabled = true;
+    if (!silent) setReingestStatus('re-ingesting\u2026', false);
+    try {
+      const resp = await fetch('/api/session/' + encodeURIComponent(sessionId) + '/reingest', { method: 'POST' });
+      if (!resp.ok) {
+        setReingestStatus('re-ingest failed (' + resp.status + ')', true);
+        return false;
+      }
+      const info = await resp.json();
+      const cost = (info.total_cost_usd == null) ? '' : ' \u00b7 $' + Number(info.total_cost_usd).toFixed(2);
+      setReingestStatus('updated ' + new Date().toLocaleTimeString() + cost, false);
+
+      // The re-ingest already succeeded; redrawing is best-effort, so a
+      // render failure must not be reported as an ingest failure.
+      try {
+        await loadSessionFromApi(sessionId);
+        render();
+      } catch (renderErr) {
+        setReingestStatus('updated' + cost + ' \u2014 reload to redraw', true);
+      }
+      return true;
+    } catch (e) {
+      setReingestStatus('re-ingest failed', true);
+      return false;
+    } finally {
+      btn.disabled = false;
+    }
+  }
+
+  function setAutorefresh(on) {
+    if (autorefreshTimer) { clearInterval(autorefreshTimer); autorefreshTimer = null; }
+    if (on) {
+      autorefreshTimer = setInterval(function() { reingestCurrentSession(true); }, AUTOREFRESH_MS);
+      setReingestStatus('auto every 30s', false);
+    } else {
+      setReingestStatus('', false);
+    }
+    try { localStorage.setItem('ctxAutorefresh', on ? '1' : '0'); } catch (e) { /* ignore */ }
+  }
+
+  function initSessionControls() {
+    document.getElementById('reingest-btn').addEventListener('click', function() {
+      reingestCurrentSession(false);
+    });
+    const toggle = document.getElementById('autorefresh-toggle');
+    toggle.addEventListener('change', function() { setAutorefresh(toggle.checked); });
+    let saved = '0';
+    try { saved = localStorage.getItem('ctxAutorefresh') || '0'; } catch (e) { /* ignore */ }
+    if (saved === '1') { toggle.checked = true; setAutorefresh(true); }
+
+    document.getElementById('header-session').addEventListener('click', function() {
+      const sid = this.dataset.sessionId;
+      if (!sid) return;
+      const done = function() { setReingestStatus('session id copied', false); };
+      if (navigator.clipboard) { navigator.clipboard.writeText(sid).then(done, function() {}); }
+    });
   }
 
   function sessionLabel(s) {
@@ -4758,6 +4856,7 @@ html, body {
 
   document.getElementById('report-btn').addEventListener('click', openReportModal);
 
+  initSessionControls();
   init();
 })();
 </script>
