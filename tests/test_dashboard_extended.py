@@ -718,6 +718,7 @@ def test_static_json_files_when_exist(tmp_path):
         trace_dir=tmp_path / "traces",
         transcript_dir=tmp_path / "transcripts",
         static_dir=static_dir,
+        db_path=tmp_path / "analyzer.db",
     )
     client = TestClient(app)
 
@@ -752,6 +753,7 @@ def test_data_dir_serves_build_artifacts(tmp_path):
         transcript_dir=tmp_path / "transcripts",
         static_dir=static_dir,
         data_dir=data_dir,
+        db_path=tmp_path / "analyzer.db",
     )
     client = TestClient(app)
 
@@ -773,6 +775,7 @@ def test_data_dir_falls_back_to_static_dir(tmp_path):
         transcript_dir=tmp_path / "transcripts",
         static_dir=static_dir,
         data_dir=data_dir,
+        db_path=tmp_path / "analyzer.db",
     )
     client = TestClient(app)
 
@@ -790,6 +793,7 @@ def test_serve_dashboard_v2_fallback(tmp_path):
         trace_dir=tmp_path / "traces",
         transcript_dir=tmp_path / "transcripts",
         static_dir=static_dir,
+        db_path=tmp_path / "analyzer.db",
     )
     client = TestClient(app)
     resp = client.get("/")

@@ -14,6 +14,7 @@ def client(tmp_path):
         trace_dir=tmp_path / "traces",
         transcript_dir=tmp_path / "transcripts",
         static_dir=tmp_path / "static",
+        db_path=tmp_path / "analyzer.db",
     )
     return TestClient(app)
 
@@ -64,6 +65,7 @@ def client_with_transcript(tmp_path):
         trace_dir=tmp_path / "traces",
         transcript_dir=transcript_dir,
         static_dir=tmp_path / "static",
+        db_path=tmp_path / "analyzer.db",
     )
     return TestClient(app), session_id
 

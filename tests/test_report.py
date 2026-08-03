@@ -480,6 +480,7 @@ class TestReportApiEndpoint:
             trace_dir=tmp_path / "traces",
             transcript_dir=tmp_path / "transcripts",
             static_dir=tmp_path / "static",
+            db_path=tmp_path / "analyzer.db",
         )
         client = TestClient(app)
         resp = client.get("/api/session/nonexistent/report")
