@@ -12,6 +12,7 @@ from dataclasses import asdict, dataclass, field
 
 from sqlalchemy.orm import Session as DbSession
 
+from context_tracker.analysis.config import PRICING, cost_of_call
 from context_tracker.db import (
     ApiCallRecord,
     BlockRecord,
@@ -19,30 +20,35 @@ from context_tracker.db import (
     SessionRecord,
 )
 
-# Pricing per million tokens (USD) — must match ingest.py cost model.
-COST_PER_M_INPUT = 15.0
-COST_PER_M_OUTPUT = 75.0
-COST_PER_M_CACHE_READ = 1.875
-COST_PER_M_CACHE_CREATION = 18.75
+
+def _session_model(db: DbSession, session_id: str) -> str | None:
+    """The model a session ran on, for pricing. None falls back to _default."""
+    session_rec = db.get(SessionRecord, session_id)
+    return str(session_rec.model) if session_rec is not None and session_rec.model else None
 
 
-def _tokens_to_cost(tokens: int) -> float:
+def _rates_for(model: str | None) -> dict[str, float]:
+    return PRICING.get(model or "", PRICING["_default"])
+
+
+def _tokens_to_cost(tokens: int, model: str | None = None) -> float:
     """Convert *input* token count to estimated cost in USD.
 
     Uses the full input-token rate. For split analysis the per-call
     helper ``_api_call_cost`` is preferred because it accounts for
     output and cache pricing too.
     """
-    return tokens * COST_PER_M_INPUT / 1_000_000
+    return tokens * _rates_for(model)["input"] / 1_000_000
 
 
-def _api_call_cost(call: ApiCallRecord) -> float:
+def _api_call_cost(call: ApiCallRecord, model: str | None = None) -> float:
     """Return the real cost of a single API call using all pricing tiers."""
-    return (
-        int(call.input_tokens or 0) * COST_PER_M_INPUT / 1_000_000
-        + int(call.output_tokens or 0) * COST_PER_M_OUTPUT / 1_000_000
-        + int(call.cache_read or 0) * COST_PER_M_CACHE_READ / 1_000_000
-        + int(call.cache_creation or 0) * COST_PER_M_CACHE_CREATION / 1_000_000
+    return cost_of_call(
+        model,
+        input_tokens=int(call.input_tokens or 0),
+        output_tokens=int(call.output_tokens or 0),
+        cache_read=int(call.cache_read or 0),
+        cache_creation=int(call.cache_creation or 0),
     )
 
 
@@ -128,7 +134,7 @@ def _detect_stale_content(
         category="stale_content",
         description=f"{stale_count} blocks lingered in context for 50+ API calls",
         tokens=stale_tokens,
-        estimated_cost=_tokens_to_cost(stale_tokens),
+        estimated_cost=_tokens_to_cost(stale_tokens, _session_model(db, session_id)),
         suggestion="Use /compact more frequently or start a new session after completing a sub-task",
     )
 
@@ -183,7 +189,7 @@ def _detect_repeated_reads(
         category="repeated_reads",
         description=f"{repeated_count} excess file reads across {sum(1 for c in label_groups.values() if c > 2)} files",
         tokens=waste_tokens,
-        estimated_cost=_tokens_to_cost(waste_tokens),
+        estimated_cost=_tokens_to_cost(waste_tokens, _session_model(db, session_id)),
         suggestion="Avoid re-reading files that have not changed. Use Edit instead of Read+Write",
     )
 
@@ -215,7 +221,7 @@ def _detect_failed_retries(
         category="failed_retries",
         description=f"{len(events)} tool failures consumed context with error output",
         tokens=waste_tokens,
-        estimated_cost=_tokens_to_cost(waste_tokens),
+        estimated_cost=_tokens_to_cost(waste_tokens, _session_model(db, session_id)),
         suggestion="Investigate recurring tool failures; each retry adds error text to context",
     )
 
@@ -248,7 +254,7 @@ def _detect_oversized_output(
         category="oversized_output",
         description=f"{len(blocks)} tool results exceeded 30K tokens",
         tokens=waste_tokens,
-        estimated_cost=_tokens_to_cost(waste_tokens),
+        estimated_cost=_tokens_to_cost(waste_tokens, _session_model(db, session_id)),
         suggestion="Use targeted reads (offset/limit) or summarize large outputs before they enter context",
     )
 
@@ -282,7 +288,8 @@ def _compute_split_recommendation(
     actual_cost = float(session_rec.total_cost_usd or 0.0) if session_rec else 0.0
 
     # Compute current total cost from per-call data (same formula as ingest.py).
-    computed_cost = sum(_api_call_cost(c) for c in api_calls)
+    model = str(session_rec.model) if session_rec is not None and session_rec.model else None
+    computed_cost = sum(_api_call_cost(c, model) for c in api_calls)
     current_cost = actual_cost if actual_cost > 0 else computed_cost
 
     if current_cost <= 0:
@@ -300,7 +307,7 @@ def _compute_split_recommendation(
 
     for i in range(2, len(api_calls) - 1):
         # Cost before split: actual per-call costs up to split
-        cost_before = sum(_api_call_cost(c) for c in api_calls[:i])
+        cost_before = sum(_api_call_cost(c, model) for c in api_calls[:i])
 
         # Context at split point
         context_at_split = int(api_calls[i - 1].input_tokens or 0)
@@ -320,13 +327,16 @@ def _compute_split_recommendation(
         # For the second session, output / cache costs stay roughly the
         # same — only the input portion shrinks.
         cost_after_output = sum(
-            int(c.output_tokens or 0) * COST_PER_M_OUTPUT / 1_000_000
-            + int(c.cache_read or 0) * COST_PER_M_CACHE_READ / 1_000_000
-            + int(c.cache_creation or 0) * COST_PER_M_CACHE_CREATION / 1_000_000
+            cost_of_call(
+                model,
+                output_tokens=int(c.output_tokens or 0),
+                cache_read=int(c.cache_read or 0),
+                cache_creation=int(c.cache_creation or 0),
+            )
             for c in api_calls[i:]
         )
 
-        projected_total = cost_before + cost_after_input * COST_PER_M_INPUT / 1_000_000 + cost_after_output
+        projected_total = cost_before + _tokens_to_cost(int(cost_after_input), model) + cost_after_output
         savings = current_cost - projected_total
 
         if savings > best_savings:

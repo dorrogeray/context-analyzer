@@ -77,6 +77,28 @@ PRICING = {
 }
 
 
+def cost_of_call(
+    model: str | None,
+    input_tokens: int = 0,
+    output_tokens: int = 0,
+    cache_read: int = 0,
+    cache_creation: int = 0,
+) -> float:
+    """Cost in USD of one API call, priced at the given model's rates.
+
+    Unknown or missing models fall back to ``_default``. Cache creation is
+    priced at the 5-minute write rate; the transcript records a single
+    cache_creation figure, so 1-hour writes (2x base) are under-counted.
+    """
+    rates = PRICING.get(model or "", PRICING["_default"])
+    return (
+        int(input_tokens) * rates["input"]
+        + int(output_tokens) * rates["output"]
+        + int(cache_read) * rates["cache_read"]
+        + int(cache_creation) * rates["cache_create"]
+    ) / 1_000_000
+
+
 def load_config(
     config_path: Path | None = None,
 ) -> tuple[StalenessConfig, HealthConfig]:

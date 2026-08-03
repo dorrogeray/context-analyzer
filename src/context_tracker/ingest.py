@@ -9,6 +9,7 @@ from typing import cast
 
 from sqlalchemy.orm import Session
 
+from context_tracker.analysis.config import cost_of_call
 from context_tracker.ccscope.reconcile import find_session_paths, reconcile
 from context_tracker.ccscope.subagents import parse_workflows
 from context_tracker.codex import (
@@ -200,16 +201,20 @@ def ingest_session(
             resident = c.get("cache_read", 0) + c.get("cache_creation", 0) + c.get("input", 0)
             peak_context = max(peak_context, resident)
 
-        cost = (
-            total_input * 15.0 / 1e6
-            + total_output * 75.0 / 1e6
-            + total_cache_read * 1.875 / 1e6
-            + total_cache_creation * 18.75 / 1e6
+        # Price each call at the model that served it — a session can switch
+        # models mid-run (/model), so a single session-level rate is wrong.
+        cost = sum(
+            cost_of_call(
+                c.get("model"),
+                input_tokens=c.get("input", 0),
+                output_tokens=c.get("output", 0),
+                cache_read=c.get("cache_read", 0),
+                cache_creation=c.get("cache_creation", 0),
+            )
+            for c in churn
         )
 
-        model = None
-        if churn and "model" in churn[0]:
-            model = churn[0]["model"]
+        model = next((c["model"] for c in churn if c.get("model")), None)
 
         # Build turn map
         turn_map = _build_turn_map(churn, blocks)

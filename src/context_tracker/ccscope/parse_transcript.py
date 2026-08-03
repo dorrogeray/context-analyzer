@@ -227,6 +227,7 @@ def parse_transcript_to_blocks(
             # Record churn
             churn_entry = {
                 "turn": api_call_index,
+                "model": msg.get("model"),
                 "cache_read": usage.get("cache_read_input_tokens", 0),
                 "cache_creation": usage.get("cache_creation_input_tokens", 0),
                 "input": usage.get("input_tokens", 0),

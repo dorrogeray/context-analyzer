@@ -7,9 +7,9 @@ from dataclasses import dataclass, field
 
 from context_tracker.analysis.config import (
     MODEL_CONTEXT_WINDOWS,
-    PRICING,
     HealthConfig,
     StalenessConfig,
+    cost_of_call,
 )
 from context_tracker.analysis.models import (
     ApiCall,
@@ -66,12 +66,12 @@ class SessionRecommendation:
 
 def compute_turn_cost(api_call: ApiCall, model: str) -> float:
     """Compute cost for a single API call."""
-    rates = PRICING.get(model, PRICING["_default"])
-    return (
-        api_call.input_tokens * rates["input"] / 1_000_000
-        + api_call.output_tokens * rates["output"] / 1_000_000
-        + api_call.cache_read_tokens * rates["cache_read"] / 1_000_000
-        + api_call.cache_creation_tokens * rates["cache_create"] / 1_000_000
+    return cost_of_call(
+        model,
+        input_tokens=api_call.input_tokens,
+        output_tokens=api_call.output_tokens,
+        cache_read=api_call.cache_read_tokens,
+        cache_creation=api_call.cache_creation_tokens,
     )
 
 
