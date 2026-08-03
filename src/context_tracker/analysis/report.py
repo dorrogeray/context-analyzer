@@ -37,6 +37,40 @@ def _tokens_to_cost(tokens: int, model: str | None = None) -> float:
     return tokens * rates_for_model(model)["input"] / 1_000_000
 
 
+def _session_end_turn(db: DbSession, session_id: str) -> int:
+    """Effective exit turn for blocks that never left context."""
+    session_rec = db.get(SessionRecord, session_id)
+    return int(session_rec.total_api_calls or 0) if session_rec is not None else 0
+
+
+def _residency(block: BlockRecord, end_turn: int) -> int:
+    """Number of API calls a block was RE-SENT on after the one it entered.
+
+    ``enter_turn`` / ``exit_turn`` are API-call indices, and a NULL
+    ``exit_turn`` means the block survived to the end of the session, so the
+    session's ``total_api_calls`` stands in. The difference is the count of
+    re-transmissions: a block entering at call 5 and leaving at call 10 is
+    re-sent on calls 6 through 10, i.e. 5 times. Same convention as
+    ``stats._estimate_wasted_spend``; zero is a legitimate result for a
+    block that entered and left on the same call.
+    """
+    exit_turn = int(block.exit_turn) if block.exit_turn is not None else end_turn
+    return max(exit_turn - int(block.enter_turn or 0), 0)
+
+
+def _resident_cost(tokens: int, token_calls: int, model: str | None = None) -> float:
+    """Cost of putting ``tokens`` into context and carrying them there.
+
+    Two distinct charges. The first transmission writes the tokens into the
+    prompt cache at the cache-creation rate. Every re-send afterwards is
+    served from that cache at the cache-read rate — a tenth of the input
+    rate. Pricing waste at the full input rate, as this module used to,
+    overstates the carry cost by 10x while ignoring residency entirely;
+    ``token_calls`` (tokens x calls re-sent) is what the re-sends scale with.
+    """
+    return cost_of_call(model, cache_creation=tokens, cache_read=token_calls)
+
+
 def _api_call_cost(call: ApiCallRecord, model: str | None = None) -> float:
     """Return the real cost of a single API call using all pricing tiers."""
     return cost_of_call(
@@ -103,8 +137,7 @@ def _detect_stale_content(
     call_index) is used as the effective exit turn.
     """
     # Determine the effective session-end turn for blocks that never exited.
-    session_rec = db.get(SessionRecord, session_id)
-    max_turn: int = int(session_rec.total_api_calls or 0) if session_rec else 0
+    max_turn = _session_end_turn(db, session_id)
 
     blocks = (
         db.query(BlockRecord)
@@ -116,12 +149,14 @@ def _detect_stale_content(
     )
 
     stale_tokens = 0
+    stale_token_calls = 0
     stale_count = 0
     for block in blocks:
         effective_exit = int(block.exit_turn) if block.exit_turn is not None else max_turn
         lifespan = effective_exit - int(block.enter_turn or 0)
         if lifespan > 50:
             stale_tokens += int(block.tokens or 0)
+            stale_token_calls += int(block.tokens or 0) * lifespan
             stale_count += 1
 
     if stale_count == 0:
@@ -131,7 +166,7 @@ def _detect_stale_content(
         category="stale_content",
         description=f"{stale_count} blocks lingered in context for 50+ API calls",
         tokens=stale_tokens,
-        estimated_cost=_tokens_to_cost(stale_tokens, _session_model(db, session_id)),
+        estimated_cost=_resident_cost(stale_tokens, stale_token_calls, _session_model(db, session_id)),
         suggestion="Use /compact more frequently or start a new session after completing a sub-task",
     )
 
@@ -156,9 +191,12 @@ def _detect_repeated_reads(
         .all()
     )
 
+    end_turn = _session_end_turn(db, session_id)
+
     label_groups: Counter[str] = Counter()
-    # Store (enter_turn, id, tokens) tuples so we can sort chronologically.
-    label_reads: dict[str, list[tuple[int, int, int]]] = {}
+    # Store (enter_turn, id, tokens, residency) so we can sort chronologically
+    # and price each excess read by how long it stayed resident.
+    label_reads: dict[str, list[tuple[int, int, int, int]]] = {}
     for block in blocks:
         label = str(block.label or "")
         if not label:
@@ -166,9 +204,17 @@ def _detect_repeated_reads(
         label_groups[label] += 1
         if label not in label_reads:
             label_reads[label] = []
-        label_reads[label].append((int(block.enter_turn or 0), int(block.id or 0), int(block.tokens or 0)))
+        label_reads[label].append(
+            (
+                int(block.enter_turn or 0),
+                int(block.id or 0),
+                int(block.tokens or 0),
+                _residency(block, end_turn),
+            )
+        )
 
     waste_tokens = 0
+    waste_token_calls = 0
     repeated_count = 0
     for label, count in label_groups.items():
         if count > 2:
@@ -178,6 +224,7 @@ def _detect_repeated_reads(
             # The first 2 reads are legitimate; excess reads after that are waste.
             chronological = sorted(label_reads[label], key=lambda t: (t[0], t[1]))
             waste_tokens += sum(t[2] for t in chronological[2:])
+            waste_token_calls += sum(t[2] * t[3] for t in chronological[2:])
 
     if repeated_count == 0:
         return None
@@ -186,7 +233,7 @@ def _detect_repeated_reads(
         category="repeated_reads",
         description=f"{repeated_count} excess file reads across {sum(1 for c in label_groups.values() if c > 2)} files",
         tokens=waste_tokens,
-        estimated_cost=_tokens_to_cost(waste_tokens, _session_model(db, session_id)),
+        estimated_cost=_resident_cost(waste_tokens, waste_token_calls, _session_model(db, session_id)),
         suggestion="Avoid re-reading files that have not changed. Use Edit instead of Read+Write",
     )
 
@@ -214,11 +261,13 @@ def _detect_failed_retries(
 
     waste_tokens = sum(int(e.error_length or 0) for e in events)
 
+    # Hook events carry no enter/exit turns, so residency is unknown; this
+    # charges only the initial write and is therefore a floor.
     return WasteItem(
         category="failed_retries",
         description=f"{len(events)} tool failures consumed context with error output",
         tokens=waste_tokens,
-        estimated_cost=_tokens_to_cost(waste_tokens, _session_model(db, session_id)),
+        estimated_cost=_resident_cost(waste_tokens, 0, _session_model(db, session_id)),
         suggestion="Investigate recurring tool failures; each retry adds error text to context",
     )
 
@@ -245,13 +294,15 @@ def _detect_oversized_output(
     if not blocks:
         return None
 
+    end_turn = _session_end_turn(db, session_id)
     waste_tokens = sum(int(block.tokens or 0) - threshold for block in blocks)
+    waste_token_calls = sum((int(block.tokens or 0) - threshold) * _residency(block, end_turn) for block in blocks)
 
     return WasteItem(
         category="oversized_output",
         description=f"{len(blocks)} tool results exceeded 30K tokens",
         tokens=waste_tokens,
-        estimated_cost=_tokens_to_cost(waste_tokens, _session_model(db, session_id)),
+        estimated_cost=_resident_cost(waste_tokens, waste_token_calls, _session_model(db, session_id)),
         suggestion="Use targeted reads (offset/limit) or summarize large outputs before they enter context",
     )
 

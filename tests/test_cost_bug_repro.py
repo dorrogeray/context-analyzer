@@ -29,9 +29,11 @@ import pytest
 
 from context_tracker.analysis.config import PRICING, cost_of_call, normalize_model
 from context_tracker.ccscope.parse_transcript import parse_transcript_to_blocks
+from context_tracker.analysis.report import _residency, _resident_cost
 from context_tracker.db import (
     AGENT_CLAUDE_CODE,
     AGENT_CODEX,
+    BlockRecord,
     SessionRecord,
     get_engine,
     get_session_factory,
@@ -478,3 +480,49 @@ def test_session_with_a_dated_model_is_priced_correctly(tmp_path):
 
     assert rec is not None
     assert rec.total_cost_usd == pytest.approx(round(expected, 4))
+
+
+# ---------------------------------------------------------------------------
+# Bug 7 — waste priced at the input rate, ignoring residency
+# ---------------------------------------------------------------------------
+
+
+def test_residency_counts_re_sends_not_calls_present():
+    """enter 5 / exit 10 means five re-transmissions."""
+    block = BlockRecord(session_id="s", block_id="b", block_type="tool_result", enter_turn=5, exit_turn=10)
+
+    assert _residency(block, end_turn=99) == 5
+
+
+def test_residency_of_a_block_that_never_left_runs_to_session_end():
+    """A NULL exit_turn means the block survived the whole session."""
+    block = BlockRecord(session_id="s", block_id="b", block_type="tool_result", enter_turn=2, exit_turn=None)
+
+    assert _residency(block, end_turn=12) == 10
+
+
+def test_residency_is_zero_when_a_block_enters_and_leaves_on_one_call():
+    """Never re-sent means no carry cost — zero, not a floor of one."""
+    block = BlockRecord(session_id="s", block_id="b", block_type="tool_result", enter_turn=7, exit_turn=7)
+
+    assert _residency(block, end_turn=99) == 0
+
+
+def test_waste_is_priced_as_cache_traffic_not_fresh_input():
+    """The old model charged the input rate; carrying context is 0.1x that."""
+    rates = PRICING["claude-opus-5"]
+    # One 1M-token block, re-sent 3 times: one cache write plus three reads.
+    cost = _resident_cost(1_000_000, 3_000_000, "claude-opus-5")
+    expected = (1_000_000 * rates["cache_create"] + 3_000_000 * rates["cache_read"]) / 1_000_000
+
+    assert cost == pytest.approx(expected)
+    # And well under what the input rate would have charged for the tokens.
+    assert cost < 1_000_000 * rates["input"] / 1_000_000 * 2
+
+
+def test_longer_residency_costs_more_for_the_same_tokens():
+    """The whole point: cost scales with how long waste stays resident."""
+    brief = _resident_cost(100_000, 100_000, "claude-opus-5")
+    lingering = _resident_cost(100_000, 5_000_000, "claude-opus-5")
+
+    assert lingering > brief
