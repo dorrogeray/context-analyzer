@@ -7,8 +7,10 @@ from __future__ import annotations
 
 import json
 import re
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 
 @dataclass
@@ -194,6 +196,30 @@ def cost_of_call(
         + ttl_5m * rates["cache_create"]
         + ttl_1h * rates["cache_create_1h"]
     ) / 1_000_000
+
+
+def cost_breakdown(calls: Iterable[Mapping[str, Any]]) -> dict[str, float]:
+    """Total cost of a sequence of API calls, split by billing component.
+
+    Each call is priced at its own model. Returns ``total`` plus a per-tier
+    breakdown, so callers that want to show what drove the spend do not have
+    to re-derive it — and therefore do not need a second copy of the rates.
+    The dashboard used to compute exactly this in JavaScript against its own
+    hardcoded table, which drifted from the server the moment rates changed.
+    """
+    out = {"input": 0.0, "output": 0.0, "cache_read": 0.0, "cache_create": 0.0}
+    for call in calls:
+        model = call.get("model")
+        out["input"] += cost_of_call(model, input_tokens=call.get("input", 0) or 0)
+        out["output"] += cost_of_call(model, output_tokens=call.get("output", 0) or 0)
+        out["cache_read"] += cost_of_call(model, cache_read=call.get("cache_read", 0) or 0)
+        out["cache_create"] += cost_of_call(
+            model,
+            cache_creation=call.get("cache_creation", 0) or 0,
+            cache_creation_1h=call.get("cache_creation_1h", 0) or 0,
+        )
+    out["total"] = sum(out.values())
+    return out
 
 
 def load_config(

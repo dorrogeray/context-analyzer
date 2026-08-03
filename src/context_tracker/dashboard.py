@@ -16,7 +16,7 @@ from context_tracker.analysis.claude_md import (
     analyze_claude_md,
     find_claude_md_files,
 )
-from context_tracker.analysis.config import StalenessConfig
+from context_tracker.analysis.config import StalenessConfig, cost_breakdown
 from context_tracker.analysis.health import (
     build_health_signals,
     classify_recommendation,
@@ -687,6 +687,10 @@ def create_app(
                             "model": parsed.get("model"),
                             "cwd": parsed.get("cwd"),
                         },
+                        # No rate table for Codex models — same stance as
+                        # ingest_codex_session, which stores 0.0 rather than
+                        # inventing a price.
+                        "cost": None,
                         "turn_map": parsed["turn_map"],
                     }
             raise HTTPException(status_code=404, detail="Session transcript not found") from exc
@@ -701,6 +705,9 @@ def create_app(
             "blocks": blocks,
             "churn": churn,
             "meta": {"session_id": session_id},
+            # Priced server-side so the dashboard renders the same number the
+            # rest of the tool reports, instead of re-deriving it in JS.
+            "cost": cost_breakdown(churn),
             "turn_map": turn_map,
         }
 

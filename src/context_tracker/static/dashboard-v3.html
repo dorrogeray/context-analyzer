@@ -1895,12 +1895,10 @@ html, body {
 
   // ===== CONSTANTS =====
   let BUDGET = 1_000_000;
-  const PRICING = {
-    input: 15 / 1e6,
-    output: 75 / 1e6,
-    cache_read: 1.875 / 1e6,
-    cache_create: 18.75 / 1e6,
-  };
+  // Cost is priced server-side (context_tracker.analysis.config) and arrives
+  // on the session payload. Do NOT reintroduce a rate table here — this file
+  // used to carry its own copy, which silently drifted from the server's.
+  let sessionCost = null;
   const SPEEDS = [1, 2, 4];
 
   // ===== STATE =====
@@ -1990,11 +1988,12 @@ html, body {
     }
 
     // Try static files first (backward compatible with ccscope build)
-    const [blocksResp, churnResp, metaResp, turnMapResp] = await Promise.all([
+    const [blocksResp, churnResp, metaResp, turnMapResp, costResp] = await Promise.all([
       fetch('./blocks.json'),
       fetch('./churn.json'),
       fetch('./meta.json').catch(() => ({ ok: false })),
       fetch('./turn_map.json').catch(() => ({ ok: false })),
+      fetch('./cost.json').catch(() => ({ ok: false })),
     ]);
 
     if (!blocksResp.ok || !churnResp.ok) {
@@ -2009,6 +2008,9 @@ html, body {
     }
     if (turnMapResp.ok) {
       try { turnMap = await turnMapResp.json(); } catch(e) { turnMap = []; }
+    }
+    if (costResp.ok) {
+      try { sessionCost = await costResp.json(); } catch(e) { sessionCost = null; }
     }
     return true;
   }
@@ -2043,6 +2045,7 @@ html, body {
       const data = await resp.json();
       blocks = data.blocks || [];
       churn = data.churn || [];
+      sessionCost = data.cost || null;
       meta = data.meta || { session_id: sessionId };
       turnMap = data.turn_map || [];
 
@@ -2269,26 +2272,21 @@ html, body {
     const convTurnInfo = turnMap.length > 0 ? turnMap.length + ' conv turns' : churn.length + ' API calls';
     document.getElementById('sc-calls-sub').textContent = convTurnInfo;
 
-    // Cost
-    const costInput = totalInput * PRICING.input;
-    const costOutput = churn.reduce((s, c) => s + c.output, 0) * PRICING.output;
-    const costCacheRead = totalRead * PRICING.cache_read;
-    const costCacheCreate = churn.reduce((s, c) => s + c.cache_creation, 0) * PRICING.cache_create;
-    const totalCost = costInput + costOutput + costCacheRead + costCacheCreate;
-
-    document.getElementById('sc-cost').textContent = fmtCost(totalCost);
-    // Find dominant
-    const components = [
-      { name: 'cache_read', cost: costCacheRead },
-      { name: 'output', cost: costOutput },
-      { name: 'cache_create', cost: costCacheCreate },
-      { name: 'input', cost: costInput },
-    ];
-    components.sort((a, b) => b.cost - a.cost);
-    const dominant = components[0];
-    const pctDominant = ((dominant.cost / totalCost) * 100).toFixed(0);
-    document.getElementById('sc-cost-sub').textContent =
-      pctDominant + '% ' + dominant.name.replace('_', ' ');
+    // Cost — server-priced, per model. Null means the agent has no rate table.
+    if (!sessionCost) {
+      document.getElementById('sc-cost').textContent = 'n/a';
+      document.getElementById('sc-cost-sub').textContent = 'no rate table for this agent';
+    } else {
+      const totalCost = sessionCost.total || 0;
+      document.getElementById('sc-cost').textContent = fmtCost(totalCost);
+      const components = ['cache_read', 'output', 'cache_create', 'input']
+        .map(function(name) { return { name: name, cost: sessionCost[name] || 0 }; })
+        .sort(function(a, b) { return b.cost - a.cost; });
+      const dominant = components[0];
+      const pctDominant = totalCost > 0 ? ((dominant.cost / totalCost) * 100).toFixed(0) : '0';
+      document.getElementById('sc-cost-sub').textContent =
+        pctDominant + '% ' + dominant.name.replace('_', ' ');
+    }
 
     // Health dot
     const dot = document.getElementById('health-dot');

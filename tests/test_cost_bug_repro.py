@@ -24,11 +24,15 @@ from __future__ import annotations
 
 import json
 import sqlite3
+from pathlib import Path
 
 import pytest
 
+import context_tracker
+
 from context_tracker.analysis.config import (
     PRICING,
+    cost_breakdown,
     context_window_for,
     cost_of_call,
     normalize_model,
@@ -625,3 +629,61 @@ def test_unforced_reingest_leaves_an_up_to_date_row_alone(tmp_path):
 
     assert again is not None
     assert again.total_cost_usd == pytest.approx(999.99)
+
+
+# ---------------------------------------------------------------------------
+# Bug 10 — the dashboard priced sessions in JS against its own rate table
+# ---------------------------------------------------------------------------
+
+
+def test_no_rate_literals_survive_in_the_frontend():
+    """The dashboard must not carry a second copy of the pricing table.
+
+    It had `const PRICING = {input: 15/1e6, ...}` and computed the scorecard
+    client-side, so the homepage and the session dropdown disagreed by 3.3x.
+    """
+    static_dir = Path(context_tracker.__file__).parent / "static"
+    offenders = []
+    for page in static_dir.glob("*.html"):
+        text = page.read_text(encoding="utf-8")
+        for literal in ("1.875", "18.75", "15 / 1e6", "75 / 1e6", "PRICING"):
+            if literal in text:
+                offenders.append(f"{page.name}: {literal}")
+
+    assert not offenders, f"pricing moved back into the frontend: {offenders}"
+
+
+def test_breakdown_components_sum_to_the_total():
+    calls = [
+        {"model": "claude-opus-5", "input": 100, "output": 1000, "cache_read": 500_000},
+        {"model": "claude-sonnet-5", "cache_creation": 10_000, "cache_creation_1h": 4_000},
+    ]
+    b = cost_breakdown(calls)
+
+    assert b["total"] == pytest.approx(b["input"] + b["output"] + b["cache_read"] + b["cache_create"])
+
+
+def test_breakdown_prices_each_call_at_its_own_model():
+    """A mixed-model session is not collapsed onto one rate."""
+    opus = cost_breakdown([{"model": "claude-opus-5", "input": 1_000_000}])
+    haiku = cost_breakdown([{"model": "claude-haiku-4-5", "input": 1_000_000}])
+    both = cost_breakdown(
+        [
+            {"model": "claude-opus-5", "input": 1_000_000},
+            {"model": "claude-haiku-4-5", "input": 1_000_000},
+        ]
+    )
+
+    assert both["total"] == pytest.approx(opus["total"] + haiku["total"])
+    assert opus["total"] > haiku["total"]
+
+
+def test_dashboard_cost_matches_the_stored_session_cost(tmp_path):
+    """The scorecard figure and the dropdown figure must be the same number."""
+    rec = _ingest(tmp_path, "sess-ui", _split_response_entries())
+    _blocks, churn = parse_transcript_to_blocks(
+        tmp_path / "projects" / "test-project" / "sess-ui.jsonl"
+    )
+
+    assert rec is not None
+    assert cost_breakdown(churn)["total"] == pytest.approx(rec.total_cost_usd, abs=1e-4)

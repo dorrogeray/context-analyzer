@@ -143,13 +143,21 @@ def write_output(
     churn: list[dict],
     output_dir: Path,
 ) -> tuple[Path, Path]:
-    """Write blocks.json and churn.json to output directory."""
+    """Write blocks.json, churn.json and cost.json to the output directory.
+
+    cost.json is priced here rather than in the dashboard's JavaScript, so
+    the static build shows the same figure as every other surface.
+    """
+    from context_tracker.analysis.config import cost_breakdown
+
     output_dir.mkdir(parents=True, exist_ok=True)
 
     blocks_path = output_dir / "blocks.json"
     churn_path = output_dir / "churn.json"
+    cost_path = output_dir / "cost.json"
 
     blocks_path.write_text(json.dumps(blocks, indent=None), encoding="utf-8")
     churn_path.write_text(json.dumps(churn, indent=None), encoding="utf-8")
+    cost_path.write_text(json.dumps(cost_breakdown(churn), indent=None), encoding="utf-8")
 
     return blocks_path, churn_path
