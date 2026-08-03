@@ -810,7 +810,7 @@ def _cli_env(tmp_path, session="sess-cli"):
 
 
 def test_cost_command_prints_every_tier(tmp_path, capsys):
-    from context_tracker.cost_cli import run_cost
+    from context_tracker.data_cli import run_cost
 
     rc = run_cost("sess-cli", **_cli_env(tmp_path))
     out = capsys.readouterr().out
@@ -822,7 +822,7 @@ def test_cost_command_prints_every_tier(tmp_path, capsys):
 
 
 def test_cost_command_json_matches_the_stored_cost(tmp_path, capsys):
-    from context_tracker.cost_cli import run_cost
+    from context_tracker.data_cli import run_cost
 
     env = _cli_env(tmp_path)
     rc = run_cost("sess-cli", as_json=True, **env)
@@ -834,7 +834,7 @@ def test_cost_command_json_matches_the_stored_cost(tmp_path, capsys):
 
 
 def test_cost_command_resolves_a_session_prefix(tmp_path, capsys):
-    from context_tracker.cost_cli import run_cost
+    from context_tracker.data_cli import run_cost
 
     rc = run_cost("sess-c", **_cli_env(tmp_path))
 
@@ -843,7 +843,7 @@ def test_cost_command_resolves_a_session_prefix(tmp_path, capsys):
 
 
 def test_cost_command_reports_a_missing_session(tmp_path, capsys):
-    from context_tracker.cost_cli import run_cost
+    from context_tracker.data_cli import run_cost
 
     rc = run_cost("nope", **_cli_env(tmp_path))
 
@@ -852,7 +852,7 @@ def test_cost_command_reports_a_missing_session(tmp_path, capsys):
 
 
 def test_reingest_command_recosts_a_stale_row(tmp_path, capsys):
-    from context_tracker.cost_cli import run_reingest
+    from context_tracker.data_cli import run_reingest
 
     env = _cli_env(tmp_path)
     con = sqlite3.connect(env["db_path"])
@@ -865,3 +865,94 @@ def test_reingest_command_recosts_a_stale_row(tmp_path, capsys):
 
     assert rc == 0
     assert "999" not in out
+
+
+# ---------------------------------------------------------------------------
+# CLI: purge
+# ---------------------------------------------------------------------------
+
+
+def test_purge_refuses_without_confirmation_or_a_terminal(tmp_path, capsys):
+    """Destructive and non-interactive: fail closed rather than guess."""
+    from context_tracker.data_cli import run_purge
+
+    env = _cli_env(tmp_path)
+    rc = run_purge(**env)
+
+    assert rc == 2
+    assert "--yes" in capsys.readouterr().err
+    assert env["db_path"].exists()
+
+
+def test_purge_aborts_unless_the_word_matches(tmp_path):
+    from context_tracker.data_cli import run_purge
+
+    env = _cli_env(tmp_path)
+    rc = run_purge(confirm=lambda prompt: "y", **env)
+
+    assert rc == 1
+    assert env["db_path"].exists()
+
+
+def test_purge_recreates_an_empty_database(tmp_path):
+    from context_tracker.data_cli import run_purge
+
+    env = _cli_env(tmp_path)
+    rc = run_purge(confirm=lambda prompt: "purge", **env)
+
+    assert rc == 0
+    assert env["db_path"].exists()  # recreated, not merely deleted
+    factory = get_session_factory(get_engine(env["db_path"]))
+    with factory() as db:
+        assert db.query(SessionRecord).count() == 0
+
+
+def test_purge_with_reingest_rebuilds_from_transcripts(tmp_path):
+    """The database is derived data — purging it loses nothing durable.
+
+    Uses a UUID-shaped session id because bulk discovery
+    (storage.list_sessions) only picks those up from the projects
+    directory, which is the shape Claude Code actually writes.
+    """
+    from context_tracker.data_cli import run_purge
+
+    env = _cli_env(tmp_path, session="11111111-2222-3333-4444-555555555555")
+    before = _session_cost(env["db_path"])
+    assert before is not None
+
+    rc = run_purge(confirm=lambda prompt: "purge", reingest=True, **env)
+
+    assert rc == 0
+    assert _session_cost(env["db_path"]) == pytest.approx(before)
+
+
+def test_purge_leaves_the_transcripts_alone(tmp_path):
+    from context_tracker.data_cli import run_purge
+
+    env = _cli_env(tmp_path)
+    transcript = env["projects_dir"] / "test-project" / "sess-cli.jsonl"
+    assert transcript.exists()
+
+    run_purge(confirm=lambda prompt: "purge", **env)
+
+    assert transcript.exists()
+
+
+def test_purge_on_a_missing_database_is_not_an_error(tmp_path):
+    from context_tracker.data_cli import run_purge
+
+    rc = run_purge(
+        yes=True,
+        db_path=tmp_path / "nothing.db",
+        trace_dir=tmp_path / "traces",
+        projects_dir=tmp_path / "projects",
+    )
+
+    assert rc == 0
+
+
+def _session_cost(db_path):
+    factory = get_session_factory(get_engine(db_path))
+    with factory() as db:
+        rec = db.query(SessionRecord).first()
+        return float(rec.total_cost_usd) if rec else None

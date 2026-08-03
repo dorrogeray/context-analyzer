@@ -585,12 +585,12 @@ def main() -> None:
     stats_parser = subparsers.add_parser("stats", help="Print a personal stats card from local data")
     stats_parser.add_argument("--share", action="store_true", help="Emit a shareable markdown snippet (numbers only)")
 
-    # cost subcommand (implemented in context_tracker.cost_cli)
+    # cost subcommand (implemented in context_tracker.data_cli)
     cost_parser = subparsers.add_parser("cost", help="Cost breakdown for one session")
     cost_parser.add_argument("session_id", help="session id, or an unambiguous prefix of one")
     cost_parser.add_argument("--json", action="store_true", dest="cost_json", help="emit JSON instead of a table")
 
-    # reingest subcommand (implemented in context_tracker.cost_cli)
+    # reingest subcommand (implemented in context_tracker.data_cli)
     reingest_parser = subparsers.add_parser(
         "reingest",
         help="Re-read transcripts into the database, recosting them at current prices",
@@ -606,6 +606,23 @@ def main() -> None:
         action="store_false",
         dest="force",
         help="skip sessions whose transcript has not changed (default is to recost everything)",
+    )
+
+    # purge subcommand (implemented in context_tracker.data_cli)
+    purge_parser = subparsers.add_parser(
+        "purge",
+        help="Delete the analyzer database and recreate it empty (transcripts are untouched)",
+    )
+    purge_parser.add_argument("--yes", action="store_true", help="skip the confirmation prompt")
+    purge_parser.add_argument(
+        "--reingest",
+        action="store_true",
+        help="rebuild from transcripts immediately after purging",
+    )
+    purge_parser.add_argument(
+        "--include-scratch",
+        action="store_true",
+        help="also remove the audit-headroom scratch databases",
     )
 
     # audit-headroom subcommand (implemented in context_tracker.headroom_audit)
@@ -644,13 +661,17 @@ def main() -> None:
 
         raise SystemExit(run_stats(share=args.share))
     if args.command == "cost":
-        from context_tracker.cost_cli import run_cost
+        from context_tracker.data_cli import run_cost
 
         raise SystemExit(run_cost(args.session_id, as_json=args.cost_json))
     if args.command == "reingest":
-        from context_tracker.cost_cli import run_reingest
+        from context_tracker.data_cli import run_reingest
 
         raise SystemExit(run_reingest(args.session_id, force=args.force))
+    if args.command == "purge":
+        from context_tracker.data_cli import run_purge
+
+        raise SystemExit(run_purge(yes=args.yes, reingest=args.reingest, include_scratch=args.include_scratch))
     if args.command == "audit-headroom":
         from context_tracker.headroom_audit import run_audit_headroom
 
