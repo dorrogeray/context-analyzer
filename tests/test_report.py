@@ -160,12 +160,16 @@ class TestTokensToCost:
         assert _tokens_to_cost(0) == 0.0
 
     def test_one_million_tokens(self):
-        # $15/M input tokens
-        assert _tokens_to_cost(1_000_000) == 15.0
+        # $5/M input tokens at the default (current Opus) rate
+        assert _tokens_to_cost(1_000_000) == 5.0
 
     def test_fractional(self):
         cost = _tokens_to_cost(500_000)
-        assert abs(cost - 7.5) < 0.001
+        assert abs(cost - 2.5) < 0.001
+
+    def test_prices_at_the_named_model(self):
+        # Sonnet input is $3/M, not the Opus default.
+        assert _tokens_to_cost(1_000_000, "claude-sonnet-5") == 3.0
 
 
 class TestApiCallCost:
@@ -180,7 +184,21 @@ class TestApiCallCost:
             cache_creation=1_000_000,
         )
         cost = _api_call_cost(call)
-        expected = 15.0 + 75.0 + 1.875 + 18.75  # $110.625
+        expected = 5.0 + 25.0 + 0.5 + 6.25  # $36.75 at current Opus rates
+        assert abs(cost - expected) < 0.001
+
+    def test_prices_at_the_named_model(self):
+        """A Sonnet call costs Sonnet rates, not the Opus default."""
+        call = ApiCallRecord(
+            session_id="x",
+            call_index=0,
+            input_tokens=1_000_000,
+            output_tokens=1_000_000,
+            cache_read=1_000_000,
+            cache_creation=1_000_000,
+        )
+        cost = _api_call_cost(call, "claude-sonnet-5")
+        expected = 3.0 + 15.0 + 0.3 + 3.75  # $22.05
         assert abs(cost - expected) < 0.001
 
 

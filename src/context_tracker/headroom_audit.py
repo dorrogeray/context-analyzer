@@ -27,11 +27,11 @@ Methodology (residency-weighted):
     summed over all API calls (each call's full resident context, counted
     once per call) — straight from the DB's sessions table.
 
-Dollarization: the DB's total_cost_usd is computed at fixed Opus rates
-(input $15/M, output $75/M, cache_read $1.875/M, cache_creation $18.75/M —
-see context_tracker/ingest.py). We derive each session's input-side cost
-share from the DB's token columns at those same fixed rates and apply the
-ceiling percentage to it. No fresh rate assumptions are introduced.
+Dollarization: the DB's total_cost_usd is priced per session at the model
+that served it (see context_tracker/analysis/config.py). We derive each
+session's input-side cost share from the DB's token columns at those same
+per-model rates and apply the ceiling percentage to it. No fresh rate
+assumptions are introduced.
 
 This is an UPPER BOUND by construction: zero retrieval clawback (CCR
 round-trips), zero prompt-cache damage from rewritten prefixes, zero answer
@@ -66,16 +66,18 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+from context_tracker.analysis.config import PRICING
 from context_tracker.db import DEFAULT_DB_DIR, DEFAULT_DB_PATH
 
 logger = logging.getLogger("headroom_audit")
 
-# Fixed rates ($ per Mtok) — MUST match context_tracker/ingest.py so the
-# dollarization is internally consistent with the DB's recorded costs.
-RATE_INPUT = 15.0
-RATE_OUTPUT = 75.0
-RATE_CACHE_READ = 1.875
-RATE_CACHE_CREATION = 18.75
+# Default-model rates ($ per Mtok), kept as module constants for the
+# experiments/ scripts that import them. Per-session dollarization uses the
+# session's own model — see input_side_cost.
+RATE_INPUT = PRICING["_default"]["input"]
+RATE_OUTPUT = PRICING["_default"]["output"]
+RATE_CACHE_READ = PRICING["_default"]["cache_read"]
+RATE_CACHE_CREATION = PRICING["_default"]["cache_create"]
 
 _UUID_RE = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
 
@@ -411,10 +413,17 @@ def open_db_readonly(db_path: Path) -> sqlite3.Connection:
 
 
 def load_sessions(conn: sqlite3.Connection) -> list[sqlite3.Row]:
-    """All Claude Code sessions, most expensive first."""
+    """All Claude Code sessions, most expensive first.
+
+    ``model`` is selected only when the DB has the column — this reads
+    externally supplied analyzer DBs, so it tolerates older schemas and
+    falls back to default-rate dollarization for them.
+    """
+    columns = {row[1] for row in conn.execute("PRAGMA table_info(sessions)")}
+    model_col = "model, " if "model" in columns else ""
     return conn.execute(
-        """
-        SELECT session_id, total_api_calls, total_input_tokens,
+        f"""
+        SELECT session_id, {model_col}total_api_calls, total_input_tokens,
                total_output_tokens, total_cache_read, total_cache_creation,
                total_cost_usd, source_mtime
         FROM sessions
@@ -535,12 +544,14 @@ class CorpusResult:
 
 
 def input_side_cost(row: sqlite3.Row) -> float:
-    """Input-side share of the recorded cost, at the same fixed rates as ingest."""
+    """Input-side share of the recorded cost, at the same rates as ingest."""
+    model = row["model"] if "model" in row.keys() else None
+    rates = PRICING.get(model or "", PRICING["_default"])
     return (
         float(
-            row["total_input_tokens"] * RATE_INPUT
-            + row["total_cache_read"] * RATE_CACHE_READ
-            + row["total_cache_creation"] * RATE_CACHE_CREATION
+            row["total_input_tokens"] * rates["input"]
+            + row["total_cache_read"] * rates["cache_read"]
+            + row["total_cache_creation"] * rates["cache_create"]
         )
         / 1e6
     )

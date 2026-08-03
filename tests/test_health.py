@@ -90,11 +90,12 @@ def test_compute_turn_cost():
     )
     cost = compute_turn_cost(api_call, "claude-opus-4-6")
     assert cost > 0
-    # cache_read: 40000 * 1.875 / 1M = 0.075
-    # cache_create: 1000 * 18.75 / 1M = 0.01875
-    # output: 500 * 75 / 1M = 0.0375
-    # input: 100 * 15 / 1M = 0.0015
-    expected = 0.075 + 0.01875 + 0.0375 + 0.0015
+    # Opus base $5/$25 per Mtok; cache read 0.1x input, cache write 1.25x input.
+    # cache_read: 40000 * 0.5 / 1M = 0.02
+    # cache_create: 1000 * 6.25 / 1M = 0.00625
+    # output: 500 * 25 / 1M = 0.0125
+    # input: 100 * 5 / 1M = 0.0005
+    expected = 0.02 + 0.00625 + 0.0125 + 0.0005
     assert abs(cost - expected) < 0.001
 
 

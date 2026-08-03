@@ -48,33 +48,44 @@ MODEL_CONTEXT_WINDOWS = {
     "claude-haiku-4-5": 200_000,
 }
 
-# Pricing per million tokens
-PRICING = {
-    "claude-opus-4-6": {
-        "input": 15.0,
-        "output": 75.0,
-        "cache_read": 1.875,
-        "cache_create": 18.75,
-    },
-    "claude-opus-4-6[1m]": {
-        "input": 15.0,
-        "output": 75.0,
-        "cache_read": 1.875,
-        "cache_create": 18.75,
-    },
-    "claude-sonnet-4-6": {
-        "input": 3.0,
-        "output": 15.0,
-        "cache_read": 0.375,
-        "cache_create": 3.75,
-    },
-    "_default": {
-        "input": 15.0,
-        "output": 75.0,
-        "cache_read": 1.875,
-        "cache_create": 18.75,
-    },
+# Cache rates are fixed multiples of a model's base input price, so they are
+# derived rather than written out per model — the previous hand-copied table
+# had cache_read at 0.125x input on every entry instead of 0.1x.
+CACHE_READ_MULTIPLIER = 0.1
+CACHE_CREATE_MULTIPLIER = 1.25  # 5-minute TTL; a 1-hour write costs 2x base
+
+# Base input/output price per million tokens, by model.
+MODEL_BASE_RATES = {
+    "claude-fable-5": (10.0, 50.0),
+    "claude-opus-5": (5.0, 25.0),
+    "claude-opus-4-8": (5.0, 25.0),
+    "claude-opus-4-7": (5.0, 25.0),
+    "claude-opus-4-6": (5.0, 25.0),
+    "claude-sonnet-5": (3.0, 15.0),
+    "claude-sonnet-4-6": (3.0, 15.0),
+    "claude-haiku-4-5": (1.0, 5.0),
 }
+
+# The 1M-context variants carry no long-context premium.
+MODEL_BASE_RATES.update({f"{name}[1m]": rates for name, rates in list(MODEL_BASE_RATES.items())})
+
+# Unknown models are priced as current Opus — the Claude Code default.
+MODEL_BASE_RATES["_default"] = MODEL_BASE_RATES["claude-opus-5"]
+
+
+def _rates(input_price: float, output_price: float) -> dict[str, float]:
+    # Rounded because input_price * 0.1 is not bit-identical to input_price / 10
+    # in binary floating point, and callers do compare these against the ratio.
+    return {
+        "input": input_price,
+        "output": output_price,
+        "cache_read": round(input_price * CACHE_READ_MULTIPLIER, 6),
+        "cache_create": round(input_price * CACHE_CREATE_MULTIPLIER, 6),
+    }
+
+
+# Pricing per million tokens
+PRICING = {name: _rates(*rates) for name, rates in MODEL_BASE_RATES.items()}
 
 
 def cost_of_call(

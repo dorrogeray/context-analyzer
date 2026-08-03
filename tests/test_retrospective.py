@@ -228,10 +228,10 @@ def test_residency_weighted_math(fixture_paths):
     assert sess.resident_token_calls == pytest.approx(20_000_000)
     assert sess.ceiling_pct == pytest.approx(5000 / 20_000_000)
 
-    # input-side cost at the ingest-fixed rates:
-    # 1e6*15/1e6 + 8e6*1.875/1e6 + 11e6*18.75/1e6 = 15 + 15 + 206.25 = 236.25
-    assert sess.input_side_cost == pytest.approx(236.25)
-    assert sess.ceiling_usd == pytest.approx(sess.ceiling_pct * 236.25)
+    # input-side cost at the default-model rates:
+    # 1e6*5/1e6 + 8e6*0.5/1e6 + 11e6*6.25/1e6 = 5 + 4 + 68.75 = 77.75
+    assert sess.input_side_cost == pytest.approx(77.75)
+    assert sess.ceiling_usd == pytest.approx(sess.ceiling_pct * 77.75)
 
     assert sess.items_total == 2
     assert sess.items_compressed == 2
