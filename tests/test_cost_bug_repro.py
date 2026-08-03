@@ -27,7 +27,12 @@ import sqlite3
 
 import pytest
 
-from context_tracker.analysis.config import PRICING, cost_of_call, normalize_model
+from context_tracker.analysis.config import (
+    PRICING,
+    context_window_for,
+    cost_of_call,
+    normalize_model,
+)
 from context_tracker.ccscope.parse_transcript import parse_transcript_to_blocks
 from context_tracker.analysis.report import _residency, _resident_cost
 from context_tracker.db import (
@@ -526,3 +531,38 @@ def test_longer_residency_costs_more_for_the_same_tokens():
     lingering = _resident_cost(100_000, 5_000_000, "claude-opus-5")
 
     assert lingering > brief
+
+
+# ---------------------------------------------------------------------------
+# Bug 8 — stale context-window table skewed utilization
+# ---------------------------------------------------------------------------
+
+
+def test_current_models_have_their_real_context_window():
+    """Current models ship a 1M window; the table said 200K."""
+    assert context_window_for("claude-opus-5", 200_000) == 1_000_000
+    assert context_window_for("claude-sonnet-5", 200_000) == 1_000_000
+    assert context_window_for("claude-opus-4-6", 200_000) == 1_000_000
+
+
+def test_haiku_keeps_its_smaller_window():
+    """Not every current model is 1M — Haiku 4.5 is 200K."""
+    assert context_window_for("claude-haiku-4-5", 1_000_000) == 200_000
+
+
+def test_context_window_lookup_normalizes_dated_ids():
+    """Same normalization as pricing, so dated IDs don't take the fallback."""
+    assert context_window_for("claude-opus-5-20260101", 12345) == 1_000_000
+    assert context_window_for("claude-opus-4-6[1m]", 12345) == 1_000_000
+
+
+def test_unknown_models_take_the_supplied_default():
+    assert context_window_for("who-knows", 200_000) == 200_000
+    assert context_window_for(None, 200_000) == 200_000
+
+
+def test_utilization_is_not_overstated_fivefold(tmp_path):
+    """A 500K peak on a 1M model is 50% utilized, not 250%."""
+    window = context_window_for("claude-opus-5", 200_000)
+
+    assert 500_000 / window == pytest.approx(0.5)

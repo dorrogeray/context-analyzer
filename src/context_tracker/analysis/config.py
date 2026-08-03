@@ -42,12 +42,41 @@ class HealthConfig:
     cache_trend_window: int = 10
 
 
+# Context window (input tokens) by model. Current models ship a 1M window as
+# the default rather than an opt-in variant, so the "[1m]" keys below are
+# aliases kept for transcripts that still report the suffixed form.
 MODEL_CONTEXT_WINDOWS = {
-    "claude-opus-4-6": 200_000,
-    "claude-opus-4-6[1m]": 1_000_000,
-    "claude-sonnet-4-6": 200_000,
+    "claude-fable-5": 1_000_000,
+    "claude-opus-5": 1_000_000,
+    "claude-opus-4-8": 1_000_000,
+    "claude-opus-4-7": 1_000_000,
+    "claude-opus-4-6": 1_000_000,
+    "claude-sonnet-5": 1_000_000,
+    "claude-sonnet-4-6": 1_000_000,
     "claude-haiku-4-5": 200_000,
+    # Older models, 200K unless the 1M variant was requested explicitly.
+    "claude-sonnet-4-5": 200_000,
+    "claude-sonnet-4-0": 200_000,
+    "claude-opus-4-1": 200_000,
+    "claude-opus-4-0": 200_000,
 }
+
+# A "[1m]" suffix always means the 1M-context variant.
+MODEL_CONTEXT_WINDOWS.update({f"{name}[1m]": 1_000_000 for name in list(MODEL_CONTEXT_WINDOWS)})
+
+
+def context_window_for(model: str | None, default: int) -> int:
+    """Context window for a reported model string, or ``default`` if unknown.
+
+    Goes through the same normalization as pricing, so a dated snapshot
+    (``claude-sonnet-4-5-20250929``) resolves instead of silently taking the
+    fallback.
+    """
+    name = (model or "").strip()
+    if name in MODEL_CONTEXT_WINDOWS:
+        return MODEL_CONTEXT_WINDOWS[name]
+    normalized = normalize_model(name)
+    return MODEL_CONTEXT_WINDOWS.get(normalized, default)
 
 # Cache rates are fixed multiples of a model's base input price, so they are
 # derived rather than written out per model — the previous hand-copied table

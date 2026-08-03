@@ -6,9 +6,9 @@ from collections import defaultdict
 from dataclasses import dataclass, field
 
 from context_tracker.analysis.config import (
-    MODEL_CONTEXT_WINDOWS,
     HealthConfig,
     StalenessConfig,
+    context_window_for,
     cost_of_call,
 )
 from context_tracker.analysis.models import (
@@ -126,7 +126,7 @@ def build_health_signals(
     if staleness_config is None:
         staleness_config = StalenessConfig()
 
-    model_window = MODEL_CONTEXT_WINDOWS.get(model, config.model_context_window)
+    model_window = context_window_for(model, config.model_context_window)
 
     # If peak context exceeds the mapped window, the session is on a larger
     # variant (e.g. transcript says "claude-opus-4-6" but it's actually the
@@ -136,8 +136,7 @@ def build_health_signals(
         default=0,
     )
     if peak_actual > model_window:
-        larger_key = model + "[1m]"
-        model_window = MODEL_CONTEXT_WINDOWS.get(larger_key, 1_000_000)
+        model_window = context_window_for(f"{model}[1m]", 1_000_000)
 
     # --- Find the final non-compaction snapshot ---
     final_snap = None
