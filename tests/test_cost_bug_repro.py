@@ -733,3 +733,63 @@ def test_only_one_module_defines_the_completed_assistant_predicate():
             offenders.append(py.name)
 
     assert not offenders, f"completed-assistant logic duplicated in: {offenders}"
+
+
+# ---------------------------------------------------------------------------
+# Bug 12 — should_clear measured cumulative volume, not context occupancy
+# ---------------------------------------------------------------------------
+
+
+def _mcp_session(tmp_path, calls, resident=100_000, model="claude-opus-5"):
+    """Transcript of N calls whose resident context stays flat at `resident`."""
+    projects = tmp_path / "projects" / "p"
+    projects.mkdir(parents=True)
+    usage = {
+        "input_tokens": 0,
+        "cache_read_input_tokens": resident,
+        "cache_creation_input_tokens": 0,
+        "output_tokens": 50,
+    }
+    with open(projects / "sess-mcp.jsonl", "w") as f:
+        f.write(json.dumps(_user_entry("go")) + "\n")
+        for i in range(calls):
+            entry = _assistant_line(
+                [{"type": "text", "text": "ok"}],
+                usage=usage,
+                uuid=f"a{i}",
+                message_id=f"msg_{i}",
+                request_id=f"req_{i}",
+            )
+            entry["message"]["model"] = model
+            f.write(json.dumps(entry) + "\n")
+    return tmp_path / "projects"
+
+
+def test_context_pct_does_not_grow_with_call_count(tmp_path):
+    """100K resident is 100K resident whether it is re-sent 5 times or 50."""
+    from context_tracker.server import should_clear
+
+    few = should_clear("sess-mcp", trace_dir=tmp_path / "t", transcript_dir=_mcp_session(tmp_path / "a", 5))
+    many = should_clear("sess-mcp", trace_dir=tmp_path / "t", transcript_dir=_mcp_session(tmp_path / "b", 50))
+
+    assert few["context_pct"] == many["context_pct"]
+
+
+def test_context_pct_is_a_percentage_of_the_window(tmp_path):
+    """100K resident on a 1M-window model is 10%, not 500%."""
+    from context_tracker.server import should_clear
+
+    result = should_clear("sess-mcp", trace_dir=tmp_path / "t", transcript_dir=_mcp_session(tmp_path, 5))
+
+    assert result["context_pct"] == pytest.approx(10.0)
+    assert result["recommendation"] == "continue"
+
+
+def test_summary_reports_peak_not_summed_context(tmp_path):
+    """peak_context_tokens is a max over calls, never a sum."""
+    from context_tracker.server import get_session_summary
+
+    summary = get_session_summary("sess-mcp", trace_dir=tmp_path / "t", transcript_dir=_mcp_session(tmp_path, 20))
+
+    assert summary["peak_context_tokens"] == 100_000
+    assert summary["total_cache_read_tokens"] == 2_000_000  # the cumulative figure still exists

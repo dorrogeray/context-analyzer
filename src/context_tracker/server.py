@@ -19,6 +19,7 @@ from context_tracker.models import (
     TrackerEvent,
 )
 from context_tracker.storage import DEFAULT_TRACE_DIR, list_sessions, read_events
+from context_tracker.analysis.config import context_window_for
 from context_tracker.transcript import parse_transcript
 
 mcp = FastMCP(name="context-tracker", version="0.1.0")
@@ -77,12 +78,19 @@ def get_session_summary(
     total_cache_read = sum(t.cache_read_input_tokens for t in api_turns)
     total_cache_create = sum(t.cache_creation_input_tokens for t in api_turns)
 
+    # Largest context resident on any one call -- what "context is N% full"
+    # actually means, as opposed to the cumulative totals above.
+    peak_context = max(
+        (t.input_tokens + t.cache_read_input_tokens + t.cache_creation_input_tokens for t in api_turns),
+        default=0,
+    )
+
     cache_hit_rate = 0.0
     cache_total = total_cache_read + total_cache_create + total_input
     if cache_total > 0:
         cache_hit_rate = round(total_cache_read / cache_total, 3)
 
-    model = starts[0].model if starts else "unknown"
+    model = api_turns[0].model if api_turns else (starts[0].model if starts else "unknown")
 
     # Duration from first to last event timestamp
     timestamps = [e.timestamp for e in events if e.timestamp]
@@ -106,6 +114,7 @@ def get_session_summary(
         "total_output_tokens": total_output,
         "total_cache_read_tokens": total_cache_read,
         "total_cache_creation_tokens": total_cache_create,
+        "peak_context_tokens": peak_context,
         "cache_hit_rate": cache_hit_rate,
         "duration_seconds": duration_seconds,
     }
@@ -218,10 +227,14 @@ def should_clear(
     """Recommend whether to clear/start a new session."""
     summary = get_session_summary(session_id, trace_dir=trace_dir, transcript_dir=transcript_dir)
 
-    total_input = (
-        summary["total_input_tokens"] + summary["total_cache_read_tokens"] + summary["total_cache_creation_tokens"]
-    )
-    context_pct = (total_input / 1_000_000 * 100) if total_input > 0 else 0
+    # Context occupancy is the PEAK resident context of any single call over
+    # the model's window -- a point-in-time measure. Summing the token counts
+    # of every call instead measures total volume ever transmitted, which
+    # grows without bound: a real session reported 4622%, so this tool
+    # returned "urgent_clear" for anything past a handful of calls.
+    window = context_window_for(summary.get("model"), 200_000)
+    peak_resident = summary["peak_context_tokens"]
+    context_pct = (peak_resident / window * 100) if window > 0 else 0
     cache_hit = summary["cache_hit_rate"] * 100
 
     reasons = []
