@@ -21,7 +21,20 @@ from pathlib import Path
 
 from sqlalchemy.orm import Session as DbSession
 
-from context_tracker.db import DEFAULT_DB_PATH, BlockRecord, SessionRecord, get_session_factory
+from context_tracker.db import (
+    AGENT_CODEX,
+    DEFAULT_DB_PATH,
+    BlockRecord,
+    SessionRecord,
+    get_session_factory,
+)
+
+# Agents this tool has no rate table for. Their sessions are stored with
+# total_cost_usd = 0.0 (see ingest.ingest_codex_session — we don't fake a
+# price), so they must be kept out of every money-bearing aggregate: summing
+# them in understates spend, and ranking over them can only ever return a
+# priced session.
+UNPRICED_AGENTS = frozenset({AGENT_CODEX})
 
 
 @dataclass
@@ -29,6 +42,7 @@ class StatsCard:
     """Aggregated, privacy-safe personal stats (numbers only)."""
 
     total_sessions: int = 0
+    priced_sessions: int = 0
     total_api_calls: int = 0
     total_spend_usd: float = 0.0
     wasted_spend_usd: float = 0.0
@@ -39,6 +53,11 @@ class StatsCard:
     top_session_cost_usd: float = 0.0
     top_session_peak_context: int = 0
     top_session_date: str = "unknown date"
+
+    @property
+    def unpriced_sessions(self) -> int:
+        """Sessions excluded from the spend figures for want of a rate table."""
+        return self.total_sessions - self.priced_sessions
 
     @property
     def cache_efficiency(self) -> float:
@@ -139,10 +158,16 @@ def compute_stats(db: DbSession) -> StatsCard:
     for rec in db.query(SessionRecord):
         card.total_sessions += 1
         card.total_api_calls += int(rec.total_api_calls or 0)
-        card.total_spend_usd += float(rec.total_cost_usd or 0.0)
         card.cache_read_tokens += int(rec.total_cache_read or 0)
         card.cache_creation_tokens += int(rec.total_cache_creation or 0)
         card.input_tokens += int(rec.total_input_tokens or 0)
+
+        # Money lines cover only agents we can actually price.
+        if str(rec.agent or "") in UNPRICED_AGENTS:
+            continue
+
+        card.priced_sessions += 1
+        card.total_spend_usd += float(rec.total_cost_usd or 0.0)
         card.wasted_spend_usd += _estimate_wasted_spend(db, rec)
         if top is None or float(rec.total_cost_usd or 0.0) > float(top.total_cost_usd or 0.0):
             top = rec
@@ -157,10 +182,11 @@ def compute_stats(db: DbSession) -> StatsCard:
 
 def render_card(card: StatsCard) -> str:
     """Render the terminal summary card (numbers only)."""
+    spend_scope = f" (across {card.priced_sessions:,} priced sessions)" if card.unpriced_sessions else ""
     rows = [
         ("Sessions analyzed", f"{card.total_sessions:,}"),
         ("API calls", f"{card.total_api_calls:,}"),
-        ("Total spend", f"${card.total_spend_usd:,.2f}"),
+        ("Total spend", f"${card.total_spend_usd:,.2f}{spend_scope}"),
         (
             "Wasted on dead-weight context",
             f"${card.wasted_spend_usd:,.2f} ({card.wasted_pct_of_spend:.1%} of spend)",
@@ -172,6 +198,13 @@ def render_card(card: StatsCard) -> str:
             f"(peak {card.top_session_peak_context:,} tokens) on {card.top_session_date}",
         ),
     ]
+    if card.unpriced_sessions:
+        rows.append(
+            (
+                "Not included in spend",
+                f"{card.unpriced_sessions:,} session(s) on agents with no rate table",
+            )
+        )
     title = "Context Analyzer — Personal Stats"
     label_w = max(len(label) for label, _ in rows)
     body = [f"  {label.ljust(label_w)}  {value}" for label, value in rows]
@@ -199,7 +232,8 @@ def render_share_markdown(card: StatsCard) -> str:
             "",
             f"- **Sessions analyzed:** {card.total_sessions:,}",
             f"- **API calls:** {card.total_api_calls:,}",
-            f"- **Total spend:** ${card.total_spend_usd:,.2f}",
+            f"- **Total spend:** ${card.total_spend_usd:,.2f}"
+            + (f" (across {card.priced_sessions:,} priced sessions)" if card.unpriced_sessions else ""),
             f"- **Wasted on dead-weight context:** ${card.wasted_spend_usd:,.2f}"
             f" ({card.wasted_pct_of_spend:.1%} of spend)",
             f"- **Cache efficiency:** {card.cache_efficiency:.1%}",

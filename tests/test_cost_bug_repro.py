@@ -1,28 +1,30 @@
-"""Repro for the inflated session-cost bug.
+"""Regression tests for the inflated session-cost bug.
 
-Sessions whose real spend is in the hundreds of dollars are reported at
-several thousand. Four independent defects compound:
+Sessions whose real spend was in the hundreds of dollars were reported at
+several thousand. Four independent defects compounded:
 
 1. Claude Code writes ONE transcript line per content block of a single API
    response (a ``thinking`` line, a ``text`` line, a ``tool_use`` line), each
-   repeating the full ``message.usage``. The parser treats every line as its
-   own API call, so usage is summed 2-3x.
-2. ``ingest.ingest_session`` looks for ``churn[0]["model"]``, which the
-   parser never emits — so the model is never recorded and every session is
-   priced at fixed Opus rates regardless of which model actually ran.
-3. The cache-read rate is 0.125x input; Anthropic charges 0.1x.
-4. ``stats.compute_stats`` aggregates across agents, but Codex sessions are
+   repeating the full ``message.usage``. The parser treated every line as its
+   own API call, so usage was summed 2-3x.
+2. ``ingest.ingest_session`` looked for ``churn[0]["model"]``, which the
+   parser never emitted — so the model was never recorded and every session
+   was priced at fixed Opus rates regardless of which model actually ran.
+3. The cache-read rate was 0.125x input; Anthropic charges 0.1x.
+4. ``stats.compute_stats`` aggregated across agents, but Codex sessions are
    deliberately stored with ``total_cost_usd = 0.0``.
 
-Every test here asserts the CORRECT behaviour, so they fail until the bugs
-are fixed. The existing fixtures miss defect 1 because their synthetic
-assistant entries carry no ``message.id`` / ``requestId`` and never split a
-response across lines — the shape that occurs in every real transcript.
+The pre-existing fixtures missed defect 1 because their synthetic assistant
+entries carry no ``message.id`` / ``requestId`` and never split a response
+across lines — the shape that occurs in every real transcript. The builders
+here model that shape deliberately.
 """
 
 from __future__ import annotations
 
 import json
+
+import pytest
 
 from context_tracker.ccscope.parse_transcript import parse_transcript_to_blocks
 from context_tracker.db import (
@@ -33,7 +35,7 @@ from context_tracker.db import (
     get_session_factory,
 )
 from context_tracker.ingest import ingest_session
-from context_tracker.stats import compute_stats
+from context_tracker.stats import UNPRICED_AGENTS, compute_stats, render_card
 
 # Usage of the one API response the repro transcripts are built around.
 _USAGE = {
@@ -270,41 +272,42 @@ def _stats_db(tmp_path):
     return db
 
 
-def test_total_spend_is_not_silently_missing_codex(tmp_path):
-    """Codex rows contribute $0, so "Total spend" is not total spend.
+def test_spend_covers_only_the_sessions_that_carry_a_price(tmp_path):
+    """Codex rows are stored at $0, so they must not dilute the spend figures.
 
-    Either price Codex sessions or exclude unpriced agents from the money
-    lines — summing both makes the card wrong by however much Codex ran.
+    The repo declines to invent OpenAI rates, which is the right call — so
+    the fix is to scope the money lines to priced agents and report the
+    remainder separately, not to sum a priced and an unpriced population.
     """
     db = _stats_db(tmp_path)
     card = compute_stats(db)
-    priced = [
-        r for r in db.query(SessionRecord) if float(r.total_cost_usd or 0.0) > 0.0
-    ]
 
-    assert card.total_sessions == len(priced), (
-        f"card sums {card.total_sessions} sessions but only {len(priced)} carry a price"
-    )
+    assert card.total_sessions == 2  # both are still analyzed
+    assert card.priced_sessions == 1
+    assert card.unpriced_sessions == 1
+    assert card.total_spend_usd == pytest.approx(14.44)
+
+
+def test_unpriced_sessions_are_disclosed_on_the_card(tmp_path):
+    """A spend number covering a subset has to say so."""
+    db = _stats_db(tmp_path)
+    rendered = render_card(compute_stats(db))
+
+    assert "1 priced session" in rendered
+    assert "no rate table" in rendered
 
 
 def test_most_expensive_session_is_not_decided_by_missing_prices(tmp_path):
-    """The top-spend session must not be picked from a $0-priced pool.
+    """The top-spend session must be picked from the priced pool only.
 
-    ``cx-1`` burns 8x the tokens of ``cc-1`` but is stored at $0, so the
-    ranking can only ever return the Claude session.
+    ``cx-1`` burns 8x the tokens of ``cc-1`` but is unpriced, so ranking
+    across both would be decided by which agent happens to have rates.
     """
     db = _stats_db(tmp_path)
     card = compute_stats(db)
-    top_tokens = max(
-        int(r.total_cache_read or 0) + int(r.total_input_tokens or 0)
-        for r in db.query(SessionRecord)
-    )
-    top_row = next(
-        r for r in db.query(SessionRecord)
-        if int(r.total_cache_read or 0) + int(r.total_input_tokens or 0) == top_tokens
-    )
+    priced = [r for r in db.query(SessionRecord) if str(r.agent) not in UNPRICED_AGENTS]
 
-    assert card.top_session_cost_usd >= float(top_row.total_cost_usd or 0.0)
-    assert float(top_row.total_cost_usd or 0.0) > 0.0, (
-        f"largest session ({top_row.agent}, {top_tokens:,} prompt tokens) is priced at $0"
+    assert card.top_session_cost_usd == pytest.approx(
+        max(float(r.total_cost_usd or 0.0) for r in priced)
     )
+    assert card.top_session_peak_context == 150_000  # cc-1, not the Codex row
