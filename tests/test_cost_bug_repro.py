@@ -23,9 +23,11 @@ here model that shape deliberately.
 from __future__ import annotations
 
 import json
+import sqlite3
 
 import pytest
 
+from context_tracker.analysis.config import PRICING, cost_of_call
 from context_tracker.ccscope.parse_transcript import parse_transcript_to_blocks
 from context_tracker.db import (
     AGENT_CLAUDE_CODE,
@@ -311,3 +313,115 @@ def test_most_expensive_session_is_not_decided_by_missing_prices(tmp_path):
         max(float(r.total_cost_usd or 0.0) for r in priced)
     )
     assert card.top_session_peak_context == 150_000  # cc-1, not the Codex row
+
+
+# ---------------------------------------------------------------------------
+# Bug 5 — the 1h cache TTL bills at 2x, not 1.25x
+# ---------------------------------------------------------------------------
+
+
+def _usage_1h(total_creation, ttl_1h):
+    """Usage where part of cache creation used the 1-hour TTL."""
+    return {
+        "input_tokens": 0,
+        "cache_read_input_tokens": 0,
+        "cache_creation_input_tokens": total_creation,
+        "output_tokens": 10,
+        "cache_creation": {
+            "ephemeral_5m_input_tokens": total_creation - ttl_1h,
+            "ephemeral_1h_input_tokens": ttl_1h,
+        },
+    }
+
+
+def _one_response(usage, session="s"):
+    return [
+        _user_entry("go"),
+        _assistant_line(
+            [{"type": "text", "text": "ok"}],
+            usage=usage,
+            uuid="a1",
+            message_id=f"msg_{session}",
+            request_id=f"req_{session}",
+        ),
+    ]
+
+
+def test_one_hour_cache_writes_cost_twice_base_input():
+    """A 1h write is 2x base input; a 5m write is 1.25x."""
+    base = PRICING["claude-opus-5"]["input"]
+
+    assert cost_of_call("claude-opus-5", cache_creation=1_000_000) == pytest.approx(base * 1.25)
+    assert cost_of_call(
+        "claude-opus-5", cache_creation=1_000_000, cache_creation_1h=1_000_000
+    ) == pytest.approx(base * 2.0)
+
+
+def test_mixed_ttl_prices_each_portion_at_its_own_rate():
+    """cache_creation is the total; the 1h portion is carved out of it."""
+    cost = cost_of_call(
+        "claude-opus-5", cache_creation=1_000_000, cache_creation_1h=400_000
+    )
+    base = PRICING["claude-opus-5"]["input"]
+    expected = (600_000 * base * 1.25 + 400_000 * base * 2.0) / 1_000_000
+
+    assert cost == pytest.approx(expected)
+
+
+def test_one_hour_portion_never_exceeds_the_total():
+    """A malformed split must not be able to inflate the cost."""
+    sane = cost_of_call("claude-opus-5", cache_creation=1000, cache_creation_1h=1000)
+
+    assert cost_of_call("claude-opus-5", cache_creation=1000, cache_creation_1h=9999) == sane
+    assert cost_of_call("claude-opus-5", cache_creation=1000, cache_creation_1h=-5) == cost_of_call(
+        "claude-opus-5", cache_creation=1000
+    )
+
+
+def test_ingest_records_and_prices_the_ttl_split(tmp_path):
+    """End to end: the 1h portion reaches the DB and the recorded cost."""
+    rec = _ingest(tmp_path, "sess-ttl", _one_response(_usage_1h(100_000, 100_000)))
+    five_min = _ingest(
+        tmp_path / "b", "sess-5m", _one_response(_usage_1h(100_000, 0), session="b")
+    )
+
+    assert rec is not None and five_min is not None
+    assert rec.total_cache_creation == 100_000
+    assert rec.total_cache_creation_1h == 100_000
+    assert five_min.total_cache_creation_1h == 0
+    # 2x vs 1.25x on the cache-creation term, which is all this session has
+    # beyond a trivial output charge.
+    assert rec.total_cost_usd > five_min.total_cost_usd
+
+
+def test_transcripts_without_the_ttl_breakdown_still_ingest(tmp_path):
+    """Older transcripts omit usage.cache_creation — treat it all as 5m."""
+    usage = dict(_USAGE)
+    usage.pop("cache_creation", None)
+    rec = _ingest(tmp_path, "sess-old", _one_response(usage))
+
+    assert rec is not None
+    assert rec.total_cache_creation_1h == 0
+
+
+def test_existing_databases_gain_the_ttl_columns(tmp_path):
+    """A DB written before these columns existed must migrate, not crash."""
+    db_path = tmp_path / "old.db"
+    con = sqlite3.connect(db_path)
+    con.execute(
+        "CREATE TABLE sessions (session_id TEXT PRIMARY KEY, agent TEXT, "
+        "total_cache_creation INTEGER, total_cost_usd REAL, source_mtime REAL)"
+    )
+    con.execute("CREATE TABLE api_calls (id INTEGER PRIMARY KEY, session_id TEXT, cache_creation INTEGER)")
+    con.commit()
+    con.close()
+
+    get_engine(db_path)  # runs _migrate_schema
+
+    con = sqlite3.connect(db_path)
+    sess_cols = {r[1] for r in con.execute("PRAGMA table_info(sessions)")}
+    call_cols = {r[1] for r in con.execute("PRAGMA table_info(api_calls)")}
+    con.close()
+
+    assert "total_cache_creation_1h" in sess_cols
+    assert "cache_creation_1h" in call_cols

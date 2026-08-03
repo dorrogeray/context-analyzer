@@ -52,7 +52,8 @@ MODEL_CONTEXT_WINDOWS = {
 # derived rather than written out per model — the previous hand-copied table
 # had cache_read at 0.125x input on every entry instead of 0.1x.
 CACHE_READ_MULTIPLIER = 0.1
-CACHE_CREATE_MULTIPLIER = 1.25  # 5-minute TTL; a 1-hour write costs 2x base
+CACHE_CREATE_MULTIPLIER = 1.25  # 5-minute TTL
+CACHE_CREATE_1H_MULTIPLIER = 2.0  # 1-hour TTL
 
 # Base input/output price per million tokens, by model.
 MODEL_BASE_RATES = {
@@ -81,6 +82,7 @@ def _rates(input_price: float, output_price: float) -> dict[str, float]:
         "output": output_price,
         "cache_read": round(input_price * CACHE_READ_MULTIPLIER, 6),
         "cache_create": round(input_price * CACHE_CREATE_MULTIPLIER, 6),
+        "cache_create_1h": round(input_price * CACHE_CREATE_1H_MULTIPLIER, 6),
     }
 
 
@@ -94,19 +96,28 @@ def cost_of_call(
     output_tokens: int = 0,
     cache_read: int = 0,
     cache_creation: int = 0,
+    cache_creation_1h: int = 0,
 ) -> float:
     """Cost in USD of one API call, priced at the given model's rates.
 
-    Unknown or missing models fall back to ``_default``. Cache creation is
-    priced at the 5-minute write rate; the transcript records a single
-    cache_creation figure, so 1-hour writes (2x base) are under-counted.
+    Unknown or missing models fall back to ``_default``.
+
+    ``cache_creation`` is the total of both cache TTLs, matching what the
+    API reports as ``cache_creation_input_tokens``. ``cache_creation_1h`` is
+    the portion of it written with the 1-hour TTL, which bills at 2x base
+    input instead of 1.25x; the remainder is priced as a 5-minute write.
+    Callers that don't know the split pass the total and get 5-minute
+    pricing, which is what the API charges when no 1h TTL is requested.
     """
     rates = PRICING.get(model or "", PRICING["_default"])
+    ttl_1h = max(0, min(int(cache_creation_1h), int(cache_creation)))
+    ttl_5m = int(cache_creation) - ttl_1h
     return (
         int(input_tokens) * rates["input"]
         + int(output_tokens) * rates["output"]
         + int(cache_read) * rates["cache_read"]
-        + int(cache_creation) * rates["cache_create"]
+        + ttl_5m * rates["cache_create"]
+        + ttl_1h * rates["cache_create_1h"]
     ) / 1_000_000
 
 

@@ -230,6 +230,7 @@ def parse_transcript_to_blocks(
                 "model": msg.get("model"),
                 "cache_read": usage.get("cache_read_input_tokens", 0),
                 "cache_creation": usage.get("cache_creation_input_tokens", 0),
+                "cache_creation_1h": _ephemeral_1h_tokens(usage),
                 "input": usage.get("input_tokens", 0),
                 "output": usage.get("output_tokens", 0),
             }
@@ -325,6 +326,24 @@ def _load_entries(path: Path) -> list[dict]:
             except json.JSONDecodeError:
                 continue
     return entries
+
+
+def _ephemeral_1h_tokens(usage: dict) -> int:
+    """Cache-creation tokens written with the 1-hour TTL.
+
+    ``cache_creation_input_tokens`` is the total across both TTLs; the
+    nested ``cache_creation`` object breaks it down. A 1-hour write bills at
+    2x base input against 1.25x for the 5-minute one, so the split has to
+    survive into the cost model. Older transcripts omit the object, in which
+    case everything is treated as a 5-minute write.
+    """
+    breakdown = usage.get("cache_creation")
+    if not isinstance(breakdown, dict):
+        return 0
+    try:
+        return int(breakdown.get("ephemeral_1h_input_tokens", 0) or 0)
+    except (TypeError, ValueError):
+        return 0
 
 
 def _response_key(entry: dict) -> str | None:

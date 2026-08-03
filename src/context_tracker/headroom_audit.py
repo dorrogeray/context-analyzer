@@ -421,10 +421,11 @@ def load_sessions(conn: sqlite3.Connection) -> list[sqlite3.Row]:
     """
     columns = {row[1] for row in conn.execute("PRAGMA table_info(sessions)")}
     model_col = "model, " if "model" in columns else ""
+    ttl_col = ", total_cache_creation_1h" if "total_cache_creation_1h" in columns else ""
     return conn.execute(
         f"""
         SELECT session_id, {model_col}total_api_calls, total_input_tokens,
-               total_output_tokens, total_cache_read, total_cache_creation,
+               total_output_tokens, total_cache_read, total_cache_creation{ttl_col},
                total_cost_usd, source_mtime
         FROM sessions
         WHERE agent = 'claude-code'
@@ -545,13 +546,18 @@ class CorpusResult:
 
 def input_side_cost(row: sqlite3.Row) -> float:
     """Input-side share of the recorded cost, at the same rates as ingest."""
-    model = row["model"] if "model" in row.keys() else None
+    keys = row.keys()
+    model = row["model"] if "model" in keys else None
     rates = PRICING.get(model or "", PRICING["_default"])
+    total_create = row["total_cache_creation"] or 0
+    create_1h = (row["total_cache_creation_1h"] or 0) if "total_cache_creation_1h" in keys else 0
+    create_1h = max(0, min(create_1h, total_create))
     return (
         float(
             row["total_input_tokens"] * rates["input"]
             + row["total_cache_read"] * rates["cache_read"]
-            + row["total_cache_creation"] * rates["cache_create"]
+            + (total_create - create_1h) * rates["cache_create"]
+            + create_1h * rates["cache_create_1h"]
         )
         / 1e6
     )

@@ -37,6 +37,9 @@ class SessionRecord(Base):
     total_output_tokens = Column(Integer, default=0)
     total_cache_read = Column(Integer, default=0)
     total_cache_creation = Column(Integer, default=0)
+    # Portion of total_cache_creation written with the 1h TTL (bills at 2x
+    # base input vs 1.25x for the 5m TTL).
+    total_cache_creation_1h = Column(Integer, default=0)
     total_cost_usd = Column(Float, default=0.0)
     health_score = Column(Float, nullable=True)
     source_mtime = Column(Float, default=0.0)  # mtime of source JSONL, for staleness check
@@ -81,6 +84,7 @@ class ApiCallRecord(Base):
     output_tokens = Column(Integer, default=0)
     cache_read = Column(Integer, default=0)
     cache_creation = Column(Integer, default=0)
+    cache_creation_1h = Column(Integer, default=0)  # 1h-TTL portion of cache_creation
     system_tokens = Column(Integer, default=0)  # estimated system prefix
     working_tokens = Column(Integer, default=0)  # working set tokens
 
@@ -200,6 +204,14 @@ def _migrate_schema(engine: Engine) -> None:
         cols = {row[1] for row in conn.execute(text("PRAGMA table_info(sessions)"))}
         if cols and "agent" not in cols:
             conn.execute(text(f"ALTER TABLE sessions ADD COLUMN agent TEXT NOT NULL DEFAULT '{AGENT_CLAUDE_CODE}'"))
+            conn.commit()
+        if cols and "total_cache_creation_1h" not in cols:
+            conn.execute(text("ALTER TABLE sessions ADD COLUMN total_cache_creation_1h INTEGER DEFAULT 0"))
+            conn.commit()
+
+        call_cols = {row[1] for row in conn.execute(text("PRAGMA table_info(api_calls)"))}
+        if call_cols and "cache_creation_1h" not in call_cols:
+            conn.execute(text("ALTER TABLE api_calls ADD COLUMN cache_creation_1h INTEGER DEFAULT 0"))
             conn.commit()
 
 

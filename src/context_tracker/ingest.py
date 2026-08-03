@@ -195,6 +195,7 @@ def ingest_session(
         total_output = sum(c.get("output", 0) for c in churn)
         total_cache_read = sum(c.get("cache_read", 0) for c in churn)
         total_cache_creation = sum(c.get("cache_creation", 0) for c in churn)
+        total_cache_creation_1h = sum(c.get("cache_creation_1h", 0) for c in churn)
 
         peak_context = 0
         for c in churn:
@@ -210,6 +211,7 @@ def ingest_session(
                 output_tokens=c.get("output", 0),
                 cache_read=c.get("cache_read", 0),
                 cache_creation=c.get("cache_creation", 0),
+                cache_creation_1h=c.get("cache_creation_1h", 0),
             )
             for c in churn
         )
@@ -231,6 +233,7 @@ def ingest_session(
             total_output_tokens=total_output,
             total_cache_read=total_cache_read,
             total_cache_creation=total_cache_creation,
+            total_cache_creation_1h=total_cache_creation_1h,
             total_cost_usd=round(cost, 4),
             source_mtime=source_mtime,
         )
@@ -246,6 +249,7 @@ def ingest_session(
                     output_tokens=c.get("output", 0),
                     cache_read=c.get("cache_read", 0),
                     cache_creation=c.get("cache_creation", 0),
+                    cache_creation_1h=c.get("cache_creation_1h", 0),
                     system_tokens=c.get("system_tokens", 0),
                     working_tokens=c.get("working_tokens", 0),
                 )

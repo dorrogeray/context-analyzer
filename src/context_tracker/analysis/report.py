@@ -49,6 +49,7 @@ def _api_call_cost(call: ApiCallRecord, model: str | None = None) -> float:
         output_tokens=int(call.output_tokens or 0),
         cache_read=int(call.cache_read or 0),
         cache_creation=int(call.cache_creation or 0),
+        cache_creation_1h=int(call.cache_creation_1h or 0),
     )
 
 
@@ -332,6 +333,7 @@ def _compute_split_recommendation(
                 output_tokens=int(c.output_tokens or 0),
                 cache_read=int(c.cache_read or 0),
                 cache_creation=int(c.cache_creation or 0),
+                cache_creation_1h=int(c.cache_creation_1h or 0),
             )
             for c in api_calls[i:]
         )
