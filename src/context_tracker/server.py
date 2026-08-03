@@ -11,6 +11,7 @@ from time import time
 
 from fastmcp import FastMCP
 
+from context_tracker.analysis.config import context_window_for
 from context_tracker.models import (
     ApiTurnEvent,
     PostCompactEvent,
@@ -19,7 +20,6 @@ from context_tracker.models import (
     TrackerEvent,
 )
 from context_tracker.storage import DEFAULT_TRACE_DIR, list_sessions, read_events
-from context_tracker.analysis.config import context_window_for
 from context_tracker.transcript import parse_transcript
 
 mcp = FastMCP(name="context-tracker", version="0.1.0")
