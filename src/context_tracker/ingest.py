@@ -172,10 +172,12 @@ def ingest_session(
     with session_factory() as db:
         # Check if already ingested and up-to-date
         existing: SessionRecord | None = db.get(SessionRecord, session_id)
-        if existing and not force:
-            if existing.source_mtime >= source_mtime:
+        if existing is not None:
+            if not force and existing.source_mtime >= source_mtime:
                 return existing  # Already up-to-date
-            # Source is newer -- delete and re-ingest
+            # Forced, or the source is newer -- delete and re-ingest. The
+            # delete has to happen on the forced path too, or the insert
+            # below collides with the existing primary key.
             db.delete(existing)
             db.flush()
 
@@ -405,8 +407,8 @@ def ingest_codex_session(
 
     with session_factory() as db:
         existing: SessionRecord | None = db.get(SessionRecord, session_id)
-        if existing and not force:
-            if existing.source_mtime >= source_mtime:
+        if existing is not None:
+            if not force and existing.source_mtime >= source_mtime:
                 return existing
             db.delete(existing)
             db.flush()

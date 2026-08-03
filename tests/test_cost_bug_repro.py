@@ -566,3 +566,62 @@ def test_utilization_is_not_overstated_fivefold(tmp_path):
     window = context_window_for("claude-opus-5", 200_000)
 
     assert 500_000 / window == pytest.approx(0.5)
+
+
+# ---------------------------------------------------------------------------
+# Bug 9 — force=True could not re-ingest an existing session
+# ---------------------------------------------------------------------------
+
+
+def test_force_reingest_replaces_an_existing_row(tmp_path):
+    """force=True must recompute, not collide with the row already there.
+
+    The delete lived inside `if existing and not force`, so a forced
+    re-ingest skipped it and the insert hit the primary key. This is the
+    only way to recost sessions after a pricing fix, and it raised.
+    """
+    entries = _split_response_entries()
+    first = _ingest(tmp_path, "sess-force", entries)
+    assert first is not None
+
+    db_path = tmp_path / "analyzer.db"
+    con = sqlite3.connect(db_path)
+    con.execute("UPDATE sessions SET total_cost_usd = 999.99")
+    con.commit()
+    con.close()
+
+    again = ingest_session(
+        "sess-force",
+        trace_dir=tmp_path / "traces",
+        db_path=db_path,
+        projects_dir=tmp_path / "projects",
+        force=True,
+    )
+
+    assert again is not None
+    assert again.total_cost_usd != pytest.approx(999.99)
+    assert again.total_cost_usd == pytest.approx(first.total_cost_usd)
+
+
+def test_unforced_reingest_leaves_an_up_to_date_row_alone(tmp_path):
+    """The idempotence that force overrides still holds without it.
+
+    Re-ingests against the *same* transcript file — writing it again would
+    bump source_mtime and legitimately trigger a re-ingest.
+    """
+    _ingest(tmp_path, "sess-idem", _split_response_entries())
+    db_path = tmp_path / "analyzer.db"
+    con = sqlite3.connect(db_path)
+    con.execute("UPDATE sessions SET total_cost_usd = 999.99")
+    con.commit()
+    con.close()
+
+    again = ingest_session(
+        "sess-idem",
+        trace_dir=tmp_path / "traces",
+        db_path=db_path,
+        projects_dir=tmp_path / "projects",
+    )
+
+    assert again is not None
+    assert again.total_cost_usd == pytest.approx(999.99)
