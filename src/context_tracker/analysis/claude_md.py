@@ -8,6 +8,7 @@ from pathlib import Path
 
 from sqlalchemy.orm import Session as DbSession
 
+from context_tracker.analysis.config import cost_of_call
 from context_tracker.db import BlockRecord, HookEventRecord, SessionRecord
 
 # ---------------------------------------------------------------------------
@@ -382,16 +383,17 @@ def generate_optimized(instructions: list[InstructionUsage]) -> str:
 # High-level analysis entry point
 # ---------------------------------------------------------------------------
 
-# Cost per 1K input tokens for Claude Sonnet 4 (representative)
-_COST_PER_1K_INPUT = 0.003
-
-
 def analyze_claude_md(
     path: Path,
     db_session: DbSession,
     min_sessions: int = 3,
+    model: str | None = None,
 ) -> ClaudeMdReport:
-    """Full analysis pipeline for a single CLAUDE.md file."""
+    """Full analysis pipeline for a single CLAUDE.md file.
+
+    ``model`` selects the pricing used for the savings estimate; it defaults
+    to the shared table's ``_default``.
+    """
     instructions = parse_claude_md(path)
     usage = correlate_usage(instructions, db_session, min_sessions=min_sessions)
     optimized = generate_optimized(usage)
@@ -401,8 +403,8 @@ def analyze_claude_md(
     rarely_tokens = sum(iu.instruction.token_count for iu in usage if iu.status == "rarely_used")
     unused_tokens = sum(iu.instruction.token_count for iu in usage if iu.status == "unused")
 
-    # Savings = unused tokens removed per session, priced at input cost
-    savings = (unused_tokens / 1000) * _COST_PER_1K_INPUT
+    # Savings = unused tokens removed per session, priced at input cost.
+    savings = cost_of_call(model, input_tokens=unused_tokens)
 
     return ClaudeMdReport(
         file_path=str(path),

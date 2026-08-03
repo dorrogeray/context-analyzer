@@ -17,6 +17,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from context_tracker.analysis.config import cost_of_call
 from context_tracker.nudge_config import NUDGE_DEFAULTS
 from context_tracker.storage import DEFAULT_TRACE_DIR
 
@@ -72,11 +73,13 @@ def _estimate_context_from_events(events: list[dict[str, Any]]) -> int:
     return total_chars // CHARS_PER_TOKEN_EST
 
 
-def _estimate_cost_from_events(events: list[dict[str, Any]]) -> float:
-    """Rough cost estimate from hook events.
+def _estimate_cost_from_events(events: list[dict[str, Any]], model: str | None = None) -> float:
+    """Rough cost estimate from hook events, used when the DB has no session.
 
-    Counts API round-trips (user_prompt events) and estimates
-    cost based on average context size growth.
+    Every tool call and every user prompt is its own API round trip that
+    re-sends the whole resident context, so both are charged, and the
+    resident context is priced at the cache-read rate — it is served from
+    the prompt cache, not billed as fresh input.
     """
     total_chars = 0
     total_cost = 0.0
@@ -86,10 +89,13 @@ def _estimate_cost_from_events(events: list[dict[str, Any]]) -> float:
             total_chars += ev.get("input_payload_chars", 0)
             total_chars += ev.get("output_payload_chars", 0)
         elif event_type == "user_prompt":
-            context_tokens = total_chars // CHARS_PER_TOKEN_EST
-            total_cost += context_tokens * 3.0 / 1_000_000
+            total_chars += ev.get("prompt_length_chars", 0)
         elif event_type == "post_compact":
             total_chars = total_chars // 3
+            continue
+        else:
+            continue
+        total_cost += cost_of_call(model, cache_read=total_chars // CHARS_PER_TOKEN_EST)
     return total_cost
 
 
@@ -121,6 +127,7 @@ def evaluate_nudges(
     # Try DB first for accurate metrics, fall back to trace estimates
     db_peak_tokens: int | None = None
     db_total_cost: float | None = None
+    db_model: str | None = None
 
     if db_path is None:
         from context_tracker.db import DEFAULT_DB_PATH
@@ -138,6 +145,7 @@ def evaluate_nudges(
                 if session is not None:
                     db_peak_tokens = int(session.peak_context_tokens or 0)
                     db_total_cost = float(session.total_cost_usd or 0.0)
+                    db_model = str(session.model) if session.model else None
         except Exception:
             logger.debug("DB fallback failed", exc_info=True)
 
@@ -169,7 +177,7 @@ def evaluate_nudges(
     # --- COST_WARNING ---
     _raw_cost = cfg.get("cost_warning_usd", 10.0)
     cost_threshold = float(_raw_cost) if _raw_cost is not None else 10.0
-    trace_cost = _estimate_cost_from_events(events) if events else 0.0
+    trace_cost = _estimate_cost_from_events(events, db_model) if events else 0.0
     total_cost = max(db_total_cost or 0.0, trace_cost)
     if total_cost > cost_threshold:
         nudges.append(
