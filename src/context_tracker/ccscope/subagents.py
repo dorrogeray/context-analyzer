@@ -11,6 +11,11 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+from context_tracker.ccscope.parse_transcript import (
+    _coalesce_assistant_entries,
+    _is_completed_assistant,
+)
+
 
 def parse_subagents(subagents_dir: Path) -> list[dict]:
     """Parse all subagent transcripts in a directory.
@@ -166,7 +171,7 @@ def _parse_single_subagent(subagents_dir: Path, agent_id: str) -> dict:
 
     # Read and parse transcript
     jsonl_path = subagents_dir / f"agent-{agent_id}.jsonl"
-    entries = _load_entries(jsonl_path)
+    entries = _coalesce_assistant_entries(_load_entries(jsonl_path))
 
     # Walk entries, collect stats from completed assistant messages
     peak_resident = 0
@@ -260,21 +265,6 @@ def _load_entries(path: Path) -> list[dict]:
             except json.JSONDecodeError:
                 continue
     return entries
-
-
-def _is_completed_assistant(msg: dict) -> bool:
-    """Check if an assistant message is a completed API response.
-
-    Same logic as parse_transcript.py — skip synthetic and incomplete entries.
-    """
-    if msg.get("model") == "synthetic":
-        return False
-    if msg.get("stop_reason") is None:
-        return False
-    usage = msg.get("usage", {})
-    if usage.get("output_tokens", 0) <= 0:
-        return False
-    return True
 
 
 def _build_parent_block(

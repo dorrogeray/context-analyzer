@@ -139,7 +139,7 @@ def parse_transcript_to_blocks(
         (blocks, churn) where blocks is a list of Context Scope block dicts
         and churn is a list of per-API-call usage dicts.
     """
-    entries = _load_entries(transcript_path)
+    entries = _coalesce_assistant_entries(_load_entries(transcript_path))
     if not entries:
         return [], []
 
@@ -324,6 +324,65 @@ def _load_entries(path: Path) -> list[dict]:
             except json.JSONDecodeError:
                 continue
     return entries
+
+
+def _response_key(entry: dict) -> str | None:
+    """Identify the API response an assistant entry belongs to.
+
+    Claude Code writes one transcript line per content block of a single
+    response — a thinking line, a text line, a tool_use line — and each one
+    repeats the full ``message.usage``. Every line of one response shares
+    ``message.id`` (and ``requestId``), so either identifies the response.
+    Returns None when neither is present, which means the line can't be
+    matched to a sibling and has to stand on its own.
+    """
+    msg = entry.get("message", {})
+    message_id = msg.get("id")
+    if message_id:
+        return str(message_id)
+    request_id = entry.get("requestId")
+    return str(request_id) if request_id else None
+
+
+def _coalesce_assistant_entries(entries: list[dict]) -> list[dict]:
+    """Fold transcript lines that describe the same API response into one.
+
+    Completed assistant lines sharing a response key are merged into the first
+    of them, concatenating their content blocks in order; the usage is counted
+    once. Everything else — user entries, streaming chunks, unknown types —
+    passes through untouched, so tool_use indexing and turn ordering are
+    unaffected.
+    """
+    merged: dict[str, dict] = {}
+    result: list[dict] = []
+
+    for entry in entries:
+        msg = entry.get("message", {})
+        if entry.get("type") != "assistant" or not _is_completed_assistant(msg):
+            result.append(entry)
+            continue
+
+        key = _response_key(entry)
+        if key is None:
+            result.append(entry)
+            continue
+
+        first = merged.get(key)
+        if first is None:
+            content = msg.get("content", [])
+            copy = dict(entry)
+            copy["message"] = {**msg, "content": list(content) if isinstance(content, list) else content}
+            merged[key] = copy
+            result.append(copy)
+            continue
+
+        # Same response, another content block — keep the block, drop the usage.
+        extra = msg.get("content", [])
+        target = first["message"].get("content")
+        if isinstance(target, list) and isinstance(extra, list):
+            target.extend(extra)
+
+    return result
 
 
 def _is_completed_assistant(msg: dict) -> bool:
@@ -664,7 +723,7 @@ def build_turn_map(transcript_path: Path) -> list[dict[str, Any]]:
         "user_prompt": "Fix ...", # User prompt text (truncated)
     }
     """
-    entries = _load_entries(transcript_path)
+    entries = _coalesce_assistant_entries(_load_entries(transcript_path))
     if not entries:
         return []
 
