@@ -29,16 +29,15 @@ from pathlib import Path
 import pytest
 
 import context_tracker
-
 from context_tracker.analysis.config import (
     PRICING,
-    cost_breakdown,
     context_window_for,
+    cost_breakdown,
     cost_of_call,
     normalize_model,
 )
-from context_tracker.ccscope.parse_transcript import parse_transcript_to_blocks
 from context_tracker.analysis.report import _residency, _resident_cost
+from context_tracker.ccscope.parse_transcript import parse_transcript_to_blocks
 from context_tracker.db import (
     AGENT_CLAUDE_CODE,
     AGENT_CODEX,
@@ -176,11 +175,7 @@ def test_split_response_does_not_inflate_session_totals(tmp_path):
 def test_split_response_does_not_inflate_peak_context(tmp_path):
     """Peak context is a single call's resident set, never a sum of lines."""
     rec = _ingest(tmp_path, "sess-split", _split_response_entries())
-    resident = (
-        _USAGE["input_tokens"]
-        + _USAGE["cache_read_input_tokens"]
-        + _USAGE["cache_creation_input_tokens"]
-    )
+    resident = _USAGE["input_tokens"] + _USAGE["cache_read_input_tokens"] + _USAGE["cache_creation_input_tokens"]
 
     assert rec is not None
     assert rec.peak_context_tokens == resident
@@ -320,9 +315,7 @@ def test_most_expensive_session_is_not_decided_by_missing_prices(tmp_path):
     card = compute_stats(db)
     priced = [r for r in db.query(SessionRecord) if str(r.agent) not in UNPRICED_AGENTS]
 
-    assert card.top_session_cost_usd == pytest.approx(
-        max(float(r.total_cost_usd or 0.0) for r in priced)
-    )
+    assert card.top_session_cost_usd == pytest.approx(max(float(r.total_cost_usd or 0.0) for r in priced))
     assert card.top_session_peak_context == 150_000  # cc-1, not the Codex row
 
 
@@ -363,16 +356,14 @@ def test_one_hour_cache_writes_cost_twice_base_input():
     base = PRICING["claude-opus-5"]["input"]
 
     assert cost_of_call("claude-opus-5", cache_creation=1_000_000) == pytest.approx(base * 1.25)
-    assert cost_of_call(
-        "claude-opus-5", cache_creation=1_000_000, cache_creation_1h=1_000_000
-    ) == pytest.approx(base * 2.0)
+    assert cost_of_call("claude-opus-5", cache_creation=1_000_000, cache_creation_1h=1_000_000) == pytest.approx(
+        base * 2.0
+    )
 
 
 def test_mixed_ttl_prices_each_portion_at_its_own_rate():
     """cache_creation is the total; the 1h portion is carved out of it."""
-    cost = cost_of_call(
-        "claude-opus-5", cache_creation=1_000_000, cache_creation_1h=400_000
-    )
+    cost = cost_of_call("claude-opus-5", cache_creation=1_000_000, cache_creation_1h=400_000)
     base = PRICING["claude-opus-5"]["input"]
     expected = (600_000 * base * 1.25 + 400_000 * base * 2.0) / 1_000_000
 
@@ -392,9 +383,7 @@ def test_one_hour_portion_never_exceeds_the_total():
 def test_ingest_records_and_prices_the_ttl_split(tmp_path):
     """End to end: the 1h portion reaches the DB and the recorded cost."""
     rec = _ingest(tmp_path, "sess-ttl", _one_response(_usage_1h(100_000, 100_000)))
-    five_min = _ingest(
-        tmp_path / "b", "sess-5m", _one_response(_usage_1h(100_000, 0), session="b")
-    )
+    five_min = _ingest(tmp_path / "b", "sess-5m", _one_response(_usage_1h(100_000, 0), session="b"))
 
     assert rec is not None and five_min is not None
     assert rec.total_cache_creation == 100_000
@@ -681,9 +670,66 @@ def test_breakdown_prices_each_call_at_its_own_model():
 def test_dashboard_cost_matches_the_stored_session_cost(tmp_path):
     """The scorecard figure and the dropdown figure must be the same number."""
     rec = _ingest(tmp_path, "sess-ui", _split_response_entries())
-    _blocks, churn = parse_transcript_to_blocks(
-        tmp_path / "projects" / "test-project" / "sess-ui.jsonl"
-    )
+    _blocks, churn = parse_transcript_to_blocks(tmp_path / "projects" / "test-project" / "sess-ui.jsonl")
 
     assert rec is not None
     assert cost_breakdown(churn)["total"] == pytest.approx(rec.total_cost_usd, abs=1e-4)
+
+
+# ---------------------------------------------------------------------------
+# Bug 11 — three transcript parsers, only one of them de-duplicated
+# ---------------------------------------------------------------------------
+
+
+def _write_split(tmp_path):
+    path = tmp_path / "s.jsonl"
+    with open(path, "w") as f:
+        for entry in _split_response_entries():
+            f.write(json.dumps(entry) + "\n")
+    return path
+
+
+def test_all_parsers_agree_on_the_api_call_count(tmp_path):
+    """One response split across three lines is one call, in every parser."""
+    from context_tracker.transcript import parse_transcript
+    from context_tracker.transcript_parser import parse_raw_transcript
+
+    path = _write_split(tmp_path)
+    _blocks, churn = parse_transcript_to_blocks(path)
+    turns = parse_transcript(path)
+    messages, _warnings = parse_raw_transcript(path)
+    assistants = [m for m in messages if m.entry_type == "assistant"]
+
+    assert len(churn) == 1
+    assert len(turns) == 1
+    assert len(assistants) == 1
+
+
+def test_all_parsers_agree_on_token_totals(tmp_path):
+    """The usage repeated on each line is counted once, in every parser."""
+    from context_tracker.transcript import parse_transcript
+    from context_tracker.transcript_parser import parse_raw_transcript
+
+    path = _write_split(tmp_path)
+    _blocks, churn = parse_transcript_to_blocks(path)
+    turns = parse_transcript(path)
+    assistants = [m for m in parse_raw_transcript(path)[0] if m.entry_type == "assistant"]
+    expected = _USAGE["cache_read_input_tokens"]
+
+    assert sum(c["cache_read"] for c in churn) == expected
+    assert sum(t.cache_read_input_tokens for t in turns) == expected
+    assert sum(m.cache_read_tokens for m in assistants) == expected
+
+
+def test_only_one_module_defines_the_completed_assistant_predicate():
+    """Guard against a fourth parser growing its own copy of the rules."""
+    pkg = Path(context_tracker.__file__).parent
+    offenders = []
+    for py in pkg.rglob("*.py"):
+        if py.name == "transcript_reader.py":
+            continue
+        text = py.read_text(encoding="utf-8")
+        if 'stop_reason") is None' in text or "stop_reason') is None" in text:
+            offenders.append(py.name)
+
+    assert not offenders, f"completed-assistant logic duplicated in: {offenders}"

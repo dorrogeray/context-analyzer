@@ -383,6 +383,7 @@ def generate_optimized(instructions: list[InstructionUsage]) -> str:
 # High-level analysis entry point
 # ---------------------------------------------------------------------------
 
+
 def analyze_claude_md(
     path: Path,
     db_session: DbSession,

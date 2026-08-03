@@ -8,10 +8,12 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from context_tracker.analysis.models import ContentBlock, DataQualityWarning
+from context_tracker.transcript_reader import (
+    coalesce_assistant_entries,
+    is_completed_assistant,
+)
 
 logger = logging.getLogger(__name__)
-
-SYNTHETIC_MODEL = "synthetic"
 
 
 @dataclass(frozen=True)
@@ -150,6 +152,11 @@ def parse_raw_transcript(
     warnings: list[DataQualityWarning] = []
     sequence_index = 0
 
+    # Read first, then coalesce: one API response is written as several
+    # transcript lines (thinking / text / tool_use), each repeating the same
+    # usage, so building a message per line double-counts every token.
+    # Line numbers ride along for the warning and fallback-id paths.
+    raw_entries: list[dict] = []
     with open(transcript_path, encoding="utf-8") as f:
         for line_number, raw_line in enumerate(f, start=1):
             raw_line = raw_line.strip()
@@ -167,80 +174,79 @@ def parse_raw_transcript(
                     )
                 )
                 continue
+            entry["_line_number"] = line_number
+            raw_entries.append(entry)
 
-            entry_type = entry.get("type", "")
+    for entry in coalesce_assistant_entries(raw_entries):
+        line_number = entry.get("_line_number", 0)
+        entry_type = entry.get("type", "")
 
-            # Skip non-message entry types
-            if entry_type in ("file-history-snapshot", "last-prompt", "pr-link", "queue-operation"):
+        # Skip non-message entry types
+        if entry_type in ("file-history-snapshot", "last-prompt", "pr-link", "queue-operation"):
+            continue
+
+        session_id = entry.get("sessionId", "unknown")
+        timestamp = entry.get("timestamp")
+        message_id = entry.get("uuid", f"gen-{line_number}")
+
+        if entry_type == "system":
+            messages.append(
+                TranscriptMessage(
+                    message_id=message_id,
+                    sequence_index=sequence_index,
+                    entry_type="system",
+                    timestamp=timestamp,
+                    session_id=session_id,
+                )
+            )
+            sequence_index += 1
+            continue
+
+        message = entry.get("message")
+        if not isinstance(message, dict):
+            continue
+
+        if entry_type == "assistant":
+            # Streaming chunks and synthetic messages are not API calls.
+            if not is_completed_assistant(message):
                 continue
 
-            session_id = entry.get("sessionId", "unknown")
-            timestamp = entry.get("timestamp")
-            message_id = entry.get("uuid", f"gen-{line_number}")
+            stop_reason = message.get("stop_reason")
+            usage = message.get("usage", {})
+            output_tokens = usage.get("output_tokens", 0)
+            model = message.get("model", "unknown")
 
-            if entry_type == "system":
-                messages.append(
-                    TranscriptMessage(
-                        message_id=message_id,
-                        sequence_index=sequence_index,
-                        entry_type="system",
-                        timestamp=timestamp,
-                        session_id=session_id,
-                    )
+            content_blocks = _parse_content_blocks(message.get("content"))
+            messages.append(
+                TranscriptMessage(
+                    message_id=message_id,
+                    sequence_index=sequence_index,
+                    entry_type="assistant",
+                    timestamp=timestamp,
+                    session_id=session_id,
+                    content_blocks=content_blocks,
+                    input_tokens=usage.get("input_tokens", 0),
+                    output_tokens=output_tokens,
+                    cache_read_tokens=usage.get("cache_read_input_tokens", 0),
+                    cache_creation_tokens=usage.get("cache_creation_input_tokens", 0),
+                    stop_reason=stop_reason,
+                    model=model,
                 )
-                sequence_index += 1
-                continue
+            )
+            sequence_index += 1
 
-            message = entry.get("message")
-            if not isinstance(message, dict):
-                continue
-
-            if entry_type == "assistant":
-                # Skip streaming chunks — only keep completed API calls
-                stop_reason = message.get("stop_reason")
-                if stop_reason is None:
-                    continue
-
-                usage = message.get("usage", {})
-                output_tokens = usage.get("output_tokens", 0)
-                if output_tokens == 0:
-                    continue
-
-                model = message.get("model", "unknown")
-                if model == SYNTHETIC_MODEL:
-                    continue
-
-                content_blocks = _parse_content_blocks(message.get("content"))
-                messages.append(
-                    TranscriptMessage(
-                        message_id=message_id,
-                        sequence_index=sequence_index,
-                        entry_type="assistant",
-                        timestamp=timestamp,
-                        session_id=session_id,
-                        content_blocks=content_blocks,
-                        input_tokens=usage.get("input_tokens", 0),
-                        output_tokens=output_tokens,
-                        cache_read_tokens=usage.get("cache_read_input_tokens", 0),
-                        cache_creation_tokens=usage.get("cache_creation_input_tokens", 0),
-                        stop_reason=stop_reason,
-                        model=model,
-                    )
+        elif entry_type == "user":
+            content_blocks = _parse_content_blocks(message.get("content"))
+            messages.append(
+                TranscriptMessage(
+                    message_id=message_id,
+                    sequence_index=sequence_index,
+                    entry_type="user",
+                    timestamp=timestamp,
+                    session_id=session_id,
+                    content_blocks=content_blocks,
                 )
-                sequence_index += 1
-
-            elif entry_type == "user":
-                content_blocks = _parse_content_blocks(message.get("content"))
-                messages.append(
-                    TranscriptMessage(
-                        message_id=message_id,
-                        sequence_index=sequence_index,
-                        entry_type="user",
-                        timestamp=timestamp,
-                        session_id=session_id,
-                        content_blocks=content_blocks,
-                    )
-                )
-                sequence_index += 1
+            )
+            sequence_index += 1
 
     return messages, warnings

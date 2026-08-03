@@ -420,18 +420,24 @@ def load_sessions(conn: sqlite3.Connection) -> list[sqlite3.Row]:
     falls back to default-rate dollarization for them.
     """
     columns = {row[1] for row in conn.execute("PRAGMA table_info(sessions)")}
-    model_col = "model, " if "model" in columns else ""
-    ttl_col = ", total_cache_creation_1h" if "total_cache_creation_1h" in columns else ""
-    return conn.execute(
-        f"""
-        SELECT session_id, {model_col}total_api_calls, total_input_tokens,
-               total_output_tokens, total_cache_read, total_cache_creation{ttl_col},
-               total_cost_usd, source_mtime
-        FROM sessions
-        WHERE agent = 'claude-code'
-        ORDER BY total_cost_usd DESC
-        """
-    ).fetchall()
+    selected = ["session_id"]
+    if "model" in columns:
+        selected.append("model")
+    selected += [
+        "total_api_calls",
+        "total_input_tokens",
+        "total_output_tokens",
+        "total_cache_read",
+        "total_cache_creation",
+    ]
+    if "total_cache_creation_1h" in columns:
+        selected.append("total_cache_creation_1h")
+    selected += ["total_cost_usd", "source_mtime"]
+
+    # Every name comes from the fixed list above, gated on a PRAGMA result --
+    # nothing here is caller-supplied.
+    query = "SELECT " + ", ".join(selected) + " FROM sessions WHERE agent = 'claude-code' ORDER BY total_cost_usd DESC"  # noqa: S608
+    return conn.execute(query).fetchall()
 
 
 def load_tool_result_blocks(conn: sqlite3.Connection, session_id: str) -> list[sqlite3.Row]:

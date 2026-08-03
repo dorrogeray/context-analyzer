@@ -80,6 +80,7 @@ def context_window_for(model: str | None, default: int) -> int:
     normalized = normalize_model(name)
     return MODEL_CONTEXT_WINDOWS.get(normalized, default)
 
+
 # Cache rates are fixed multiples of a model's base input price, so they are
 # derived rather than written out per model — the previous hand-copied table
 # had cache_read at 0.125x input on every entry instead of 0.1x.

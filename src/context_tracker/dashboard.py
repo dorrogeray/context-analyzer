@@ -63,6 +63,11 @@ from context_tracker.ingest import ingest_codex_session, ingest_session
 from context_tracker.nudges import evaluate_nudges
 from context_tracker.storage import DEFAULT_TRACE_DIR, list_sessions, read_events
 from context_tracker.transcript_parser import parse_raw_transcript
+from context_tracker.transcript_reader import (
+    coalesce_assistant_entries,
+    is_completed_assistant,
+    load_entries,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -952,43 +957,33 @@ def create_app(
             # Collect all Agent tool_use blocks with their descriptions and conv_turns
             agent_launches: list[dict[str, object]] = []
             api_call_idx = -1
-            with open(transcript_path) as f:
-                for line in f:
-                    line = line.strip()
-                    if not line:
+            # Coalesced so api_call_idx lines up with build_turn_map's call
+            # indices — counting raw lines would drift by the number of
+            # multi-block responses.
+            for entry in coalesce_assistant_entries(load_entries(transcript_path)):
+                if entry.get("type") != "assistant":
+                    continue
+                message = entry.get("message", {})
+                if not is_completed_assistant(message):
+                    continue
+                api_call_idx += 1
+                content = message.get("content", [])
+                if not isinstance(content, list):
+                    continue
+                for block_item in content:
+                    if not isinstance(block_item, dict):
                         continue
-                    try:
-                        entry = json.loads(line)
-                    except json.JSONDecodeError:
-                        continue
-                    if entry.get("type") != "assistant":
-                        continue
-                    message = entry.get("message", {})
-                    if message.get("stop_reason") is None:
-                        continue
-                    usage = message.get("usage", {})
-                    if usage.get("output_tokens", 0) == 0:
-                        continue
-                    if message.get("model") == "synthetic":
-                        continue
-                    api_call_idx += 1
-                    content = message.get("content", [])
-                    if not isinstance(content, list):
-                        continue
-                    for block_item in content:
-                        if not isinstance(block_item, dict):
-                            continue
-                        if block_item.get("type") == "tool_use" and block_item.get("name") in ("Agent", "Task"):
-                            inp = block_item.get("input", {})
-                            desc = inp.get("description", inp.get("prompt", "")) if isinstance(inp, dict) else ""
-                            # Find conv_turn for this api_call_idx
-                            conv_turn = None
-                            for tm in turn_map_data:
-                                if tm["first_call"] <= api_call_idx <= tm["last_call"]:
-                                    conv_turn = tm["conv_turn"]
-                                    break
-                            if conv_turn is not None:
-                                agent_launches.append({"desc": str(desc)[:80], "conv_turn": conv_turn})
+                    if block_item.get("type") == "tool_use" and block_item.get("name") in ("Agent", "Task"):
+                        inp = block_item.get("input", {})
+                        desc = inp.get("description", inp.get("prompt", "")) if isinstance(inp, dict) else ""
+                        # Find conv_turn for this api_call_idx
+                        conv_turn = None
+                        for tm in turn_map_data:
+                            if tm["first_call"] <= api_call_idx <= tm["last_call"]:
+                                conv_turn = tm["conv_turn"]
+                                break
+                        if conv_turn is not None:
+                            agent_launches.append({"desc": str(desc)[:80], "conv_turn": conv_turn})
 
         engine = get_engine(db_path)
         factory = get_session_factory(engine)
@@ -2201,47 +2196,37 @@ def create_app(
             # Re-scan transcript for neighbor turns
             neighbor_api_idx = -1
             neighbor_tu_map: dict[str, str] = {}
-            with open(transcript_path) as f2:
-                for nline in f2:
-                    nline = nline.strip()
-                    if not nline:
+            # Same coalescing as above so neighbor_api_idx matches the turn map.
+            for nentry in coalesce_assistant_entries(load_entries(transcript_path)):
+                ntype = nentry.get("type", "")
+                if ntype in ("file-history-snapshot", "last-prompt", "pr-link", "queue-operation"):
+                    continue
+                if ntype == "user":
+                    ncontent = nentry.get("message", {}).get("content", "")
+                    if isinstance(ncontent, list):
+                        for ni in ncontent:
+                            if isinstance(ni, dict) and ni.get("type") == "tool_result":
+                                tuid = ni.get("tool_use_id", "")
+                                if ni.get("is_error") and tuid in neighbor_tu_map:
+                                    nearby_error_tools.append(neighbor_tu_map[tuid])
+                    continue
+                if ntype == "assistant":
+                    nmsg = nentry.get("message", {})
+                    if not is_completed_assistant(nmsg):
                         continue
-                    try:
-                        nentry = json.loads(nline)
-                    except json.JSONDecodeError:
-                        continue
-                    ntype = nentry.get("type", "")
-                    if ntype in ("file-history-snapshot", "last-prompt", "pr-link", "queue-operation"):
-                        continue
-                    if ntype == "user":
-                        ncontent = nentry.get("message", {}).get("content", "")
+                    neighbor_api_idx += 1
+                    in_neighbor = any(fc <= neighbor_api_idx <= lc for fc, lc in neighbor_turns)
+                    if in_neighbor:
+                        ncontent = nmsg.get("content", "")
                         if isinstance(ncontent, list):
                             for ni in ncontent:
-                                if isinstance(ni, dict) and ni.get("type") == "tool_result":
-                                    tuid = ni.get("tool_use_id", "")
-                                    if ni.get("is_error") and tuid in neighbor_tu_map:
-                                        nearby_error_tools.append(neighbor_tu_map[tuid])
-                        continue
-                    if ntype == "assistant":
-                        nmsg = nentry.get("message", {})
-                        nusage = nmsg.get("usage", {})
-                        if nmsg.get("stop_reason") is None or nusage.get("output_tokens", 0) == 0:
-                            continue
-                        if nmsg.get("model", "") == "synthetic":
-                            continue
-                        neighbor_api_idx += 1
-                        in_neighbor = any(fc <= neighbor_api_idx <= lc for fc, lc in neighbor_turns)
-                        if in_neighbor:
-                            ncontent = nmsg.get("content", "")
-                            if isinstance(ncontent, list):
-                                for ni in ncontent:
-                                    if isinstance(ni, dict):
-                                        if ni.get("type") == "tool_use":
-                                            neighbor_tu_map[ni.get("id", "")] = ni.get("name", "unknown")
-                                        elif ni.get("type") == "tool_result":
-                                            tuid = ni.get("tool_use_id", "")
-                                            if ni.get("is_error") and tuid in neighbor_tu_map:
-                                                nearby_error_tools.append(neighbor_tu_map[tuid])
+                                if isinstance(ni, dict):
+                                    if ni.get("type") == "tool_use":
+                                        neighbor_tu_map[ni.get("id", "")] = ni.get("name", "unknown")
+                                    elif ni.get("type") == "tool_result":
+                                        tuid = ni.get("tool_use_id", "")
+                                        if ni.get("is_error") and tuid in neighbor_tu_map:
+                                            nearby_error_tools.append(neighbor_tu_map[tuid])
 
         # Count error tool_names -- retry if same name appears 2+ times
         retry_tool_names = set()
