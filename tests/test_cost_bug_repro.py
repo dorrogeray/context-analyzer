@@ -793,3 +793,75 @@ def test_summary_reports_peak_not_summed_context(tmp_path):
 
     assert summary["peak_context_tokens"] == 100_000
     assert summary["total_cache_read_tokens"] == 2_000_000  # the cumulative figure still exists
+
+
+# ---------------------------------------------------------------------------
+# CLI: per-session cost and re-ingest
+# ---------------------------------------------------------------------------
+
+
+def _cli_env(tmp_path, session="sess-cli"):
+    _ingest(tmp_path, session, _split_response_entries())
+    return {
+        "db_path": tmp_path / "analyzer.db",
+        "trace_dir": tmp_path / "traces",
+        "projects_dir": tmp_path / "projects",
+    }
+
+
+def test_cost_command_prints_every_tier(tmp_path, capsys):
+    from context_tracker.cost_cli import run_cost
+
+    rc = run_cost("sess-cli", **_cli_env(tmp_path))
+    out = capsys.readouterr().out
+
+    assert rc == 0
+    for tier in ("cache read", "cache create", "output", "input", "total"):
+        assert tier in out
+    assert "claude-opus-4-6" in out
+
+
+def test_cost_command_json_matches_the_stored_cost(tmp_path, capsys):
+    from context_tracker.cost_cli import run_cost
+
+    env = _cli_env(tmp_path)
+    rc = run_cost("sess-cli", as_json=True, **env)
+    payload = json.loads(capsys.readouterr().out)
+
+    assert rc == 0
+    assert payload["cost"]["total"] == pytest.approx(payload["stored_cost_usd"], abs=1e-4)
+    assert payload["api_calls"] == 1
+
+
+def test_cost_command_resolves_a_session_prefix(tmp_path, capsys):
+    from context_tracker.cost_cli import run_cost
+
+    rc = run_cost("sess-c", **_cli_env(tmp_path))
+
+    assert rc == 0
+    assert "sess-cli" in capsys.readouterr().out
+
+
+def test_cost_command_reports_a_missing_session(tmp_path, capsys):
+    from context_tracker.cost_cli import run_cost
+
+    rc = run_cost("nope", **_cli_env(tmp_path))
+
+    assert rc == 1
+    assert "no transcript found" in capsys.readouterr().err
+
+
+def test_reingest_command_recosts_a_stale_row(tmp_path, capsys):
+    from context_tracker.cost_cli import run_reingest
+
+    env = _cli_env(tmp_path)
+    con = sqlite3.connect(env["db_path"])
+    con.execute("UPDATE sessions SET total_cost_usd = 999.99")
+    con.commit()
+    con.close()
+
+    rc = run_reingest("sess-cli", **env)
+    out = capsys.readouterr().out
+
+    assert rc == 0
+    assert "999" not in out

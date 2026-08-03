@@ -585,6 +585,29 @@ def main() -> None:
     stats_parser = subparsers.add_parser("stats", help="Print a personal stats card from local data")
     stats_parser.add_argument("--share", action="store_true", help="Emit a shareable markdown snippet (numbers only)")
 
+    # cost subcommand (implemented in context_tracker.cost_cli)
+    cost_parser = subparsers.add_parser("cost", help="Cost breakdown for one session")
+    cost_parser.add_argument("session_id", help="session id, or an unambiguous prefix of one")
+    cost_parser.add_argument("--json", action="store_true", dest="cost_json", help="emit JSON instead of a table")
+
+    # reingest subcommand (implemented in context_tracker.cost_cli)
+    reingest_parser = subparsers.add_parser(
+        "reingest",
+        help="Re-read transcripts into the database, recosting them at current prices",
+    )
+    reingest_parser.add_argument(
+        "session_id",
+        nargs="?",
+        default=None,
+        help="session id or prefix; omit to re-ingest every session",
+    )
+    reingest_parser.add_argument(
+        "--no-force",
+        action="store_false",
+        dest="force",
+        help="skip sessions whose transcript has not changed (default is to recost everything)",
+    )
+
     # audit-headroom subcommand (implemented in context_tracker.headroom_audit)
     audit_parser = subparsers.add_parser(
         "audit-headroom",
@@ -620,6 +643,14 @@ def main() -> None:
         from context_tracker.stats import run_stats
 
         raise SystemExit(run_stats(share=args.share))
+    if args.command == "cost":
+        from context_tracker.cost_cli import run_cost
+
+        raise SystemExit(run_cost(args.session_id, as_json=args.cost_json))
+    if args.command == "reingest":
+        from context_tracker.cost_cli import run_reingest
+
+        raise SystemExit(run_reingest(args.session_id, force=args.force))
     if args.command == "audit-headroom":
         from context_tracker.headroom_audit import run_audit_headroom
 
